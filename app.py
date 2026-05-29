@@ -3168,6 +3168,10 @@ def parse_google_sheet_id(value: str) -> str:
 
 
 def google_credentials_ready() -> tuple[bool, str]:
+    oauth_info = google_oauth_secret()
+    if oauth_info:
+        account = oauth_info.get("account") or "authorized Google user"
+        return True, f"Google OAuth secrets are ready ({account})."
     secret_info = google_service_account_secret()
     if secret_info:
         email = secret_info.get("client_email", "service account")
@@ -3199,6 +3203,25 @@ def google_service_account_secret() -> dict[str, object] | None:
     return None
 
 
+def google_oauth_secret() -> dict[str, object] | None:
+    try:
+        for key in ("google_oauth", "google_authorized_user"):
+            if key in st.secrets:
+                secret = dict(st.secrets[key])
+                required = ("client_id", "client_secret", "refresh_token", "token_uri")
+                if not all(secret.get(field) for field in required):
+                    continue
+                scopes = secret.get("scopes")
+                if isinstance(scopes, str):
+                    secret["scopes"] = [scope.strip() for scope in scopes.split(",") if scope.strip()]
+                elif not scopes:
+                    secret["scopes"] = GOOGLE_SCOPES
+                return secret
+    except Exception:
+        return None
+    return None
+
+
 def get_google_services():
     ready, message = google_credentials_ready()
     if not ready:
@@ -3209,6 +3232,17 @@ def get_google_services():
     from google.oauth2.service_account import Credentials as ServiceAccountCredentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
+
+    oauth_info = google_oauth_secret()
+    if oauth_info:
+        creds = Credentials.from_authorized_user_info(oauth_info, GOOGLE_SCOPES)
+        if not creds.valid:
+            creds.refresh(Request())
+        return (
+            build("sheets", "v4", credentials=creds),
+            build("drive", "v3", credentials=creds),
+            build("driveactivity", "v2", credentials=creds),
+        )
 
     service_account_info = google_service_account_secret()
     if service_account_info:

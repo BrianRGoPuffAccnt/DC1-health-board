@@ -4,6 +4,8 @@ Use `.streamlit/secrets.toml` as your local working file only. It is ignored by 
 
 The values in `google_token.json` and `google_credentials.json` are for the local OAuth desktop flow. Streamlit Community Cloud should use a Google service account key instead.
 
+If Gopuff policy blocks sharing Sheets with the service account, use the optional `[google_oauth]` block instead. That lets Streamlit refresh with the authorized Google user that already has access to the files.
+
 ## Where the Values Come From
 
 In Google Cloud Console, open:
@@ -35,11 +37,34 @@ universe_domain = "googleapis.com"
 
 Then add the `[[google_sheets]]` blocks from `.streamlit/secrets.toml`.
 
+## Optional Work-Account OAuth Fallback
+
+Use this only when the hosted app shows `403 caller does not have permission` for org-owned Google Sheets that cannot be shared with the service account.
+
+Copy the values from the local `data/google_token.json` authorized by the work account:
+
+```toml
+[google_oauth]
+client_id = "..."
+client_secret = "..."
+refresh_token = "..."
+token_uri = "https://oauth2.googleapis.com/token"
+account = "your.work.account@example.com"
+scopes = [
+  "https://www.googleapis.com/auth/spreadsheets.readonly",
+  "https://www.googleapis.com/auth/drive.metadata.readonly",
+  "https://www.googleapis.com/auth/drive.activity.readonly",
+]
+```
+
+When `[google_oauth]` is present, the app uses it before `[gcp_service_account]`.
+
 ## Final Checklist
 
 1. Fill `.streamlit/secrets.toml` locally.
 2. Share every connected Google Sheet with the service account email.
-3. Paste the full TOML into Streamlit Community Cloud > App settings > Secrets.
-4. Deploy or reboot the Streamlit app.
+3. If service account sharing is blocked, add `[google_oauth]` from a work-account token instead.
+4. Paste the full TOML into Streamlit Community Cloud > App settings > Secrets.
+5. Deploy or reboot the Streamlit app.
 
 Never commit `.streamlit/secrets.toml`.
