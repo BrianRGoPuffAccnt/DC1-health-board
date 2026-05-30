@@ -3336,6 +3336,23 @@ def sheets_to_fetch_for_tag(tag: str, sheet_names: list[str]) -> tuple[list[str]
         ]
         return selected[:8] or clean_names[:1], "Carrier mapping profile tabs"
 
+    if tag_key == "allocation history":
+        selected = [
+            sheet
+            for sheet in clean_names
+            if any(token in sheet.casefold() for token in ["allocation", "dc1", "daily", "tracker"])
+            or parse_date_sheet_name(str(sheet)) is not None
+        ]
+        return selected[-6:] or clean_names[-3:] or clean_names[:1], "Allocation history recent working tabs"
+
+    if tag_key == "rfp cost":
+        selected = [
+            sheet
+            for sheet in clean_names
+            if any(token in sheet.casefold() for token in ["linehaul", "final mile", "inbound", "pricing", "rate", "cost"])
+        ]
+        return selected[:8] or clean_names[:2], "RFP lane and cost tabs"
+
     return clean_names[:1], "first sheet only"
 
 
@@ -6407,6 +6424,227 @@ def render_field_table(title: str, values: dict[str, object]) -> None:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+def compact_location_key(value: object) -> str:
+    text = cell_text(value).casefold()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def compact_site_id(value: object) -> str:
+    text = cell_text(value)
+    if not text:
+        return ""
+    parsed = parse_mfc_number(text)
+    if parsed:
+        return parsed
+    match = re.search(r"\b(\d{1,5})\b", text)
+    return match.group(1) if match else ""
+
+
+def read_google_sheet_best_table(
+    workbook_type: str,
+    preferred_tokens: list[str] | None = None,
+) -> tuple[pd.Series | None, pd.DataFrame, str]:
+    connection = latest_google_sheet_by_type(workbook_type)
+    if connection is None:
+        return None, pd.DataFrame(), ""
+    values_by_sheet = json.loads(connection.get("values_json") or "{}")
+    if not values_by_sheet:
+        return connection, pd.DataFrame(), ""
+    preferred_tokens = [token.casefold() for token in (preferred_tokens or [])]
+    candidates: list[tuple[int, int, str, pd.DataFrame]] = []
+    for sheet_name, values in values_by_sheet.items():
+        if not values:
+            continue
+        table = infer_header_table(pd.DataFrame(values))
+        if table.empty:
+            continue
+        token_score = int(any(token in str(sheet_name).casefold() for token in preferred_tokens))
+        candidates.append((token_score, len(table), str(sheet_name), table))
+    if not candidates:
+        return connection, pd.DataFrame(), ""
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    _, _, sheet_name, table = candidates[0]
+    return connection, table, sheet_name
+
+
+def build_site_information_context() -> tuple[pd.DataFrame, str]:
+    connection, site_info, sheet_name = read_google_sheet_best_table(
+        "Site Information",
+        ["site", "market", "information"],
+    )
+    if site_info.empty:
+        connection, site_info, sheet_name = read_google_sheet_best_table("Other", ["site", "market", "information"])
+    if site_info.empty:
+        return pd.DataFrame(), ""
+
+    location_col = first_matching_column(site_info, [["location", "name"], ["site", "name"]])
+    site_id_col = first_matching_column(site_info, [["location", "id"], ["site", "id"]])
+    lane_col = first_matching_column(site_info, [["market"], ["lane"]])
+    keep_map = {
+        "Site Info Lane": lane_col,
+        "Site Info Location Name": location_col,
+        "Site Info Location ID": site_id_col,
+        "Site Leader": first_matching_column(site_info, [["site", "leader"]]),
+        "Regional Manager": first_matching_column(site_info, [["regional", "manager"]]),
+        "Full Address": first_matching_column(site_info, [["full", "address"]]),
+        "SCBP": first_matching_column(site_info, [["scbp"]]),
+    }
+    keep_cols = [col for col in keep_map.values() if col]
+    if not keep_cols:
+        return pd.DataFrame(), sheet_name
+    result = site_info[keep_cols].copy()
+    result = result.rename(columns={source: target for target, source in keep_map.items() if source})
+    result["_site_id_key"] = result.get("Site Info Location ID", pd.Series("", index=result.index)).map(compact_site_id)
+    result["_location_key"] = result.get("Site Info Location Name", pd.Series("", index=result.index)).map(compact_location_key)
+    return result.drop_duplicates(["_site_id_key", "_location_key"]), sheet_name
+
+
+def build_allocation_operating_context() -> tuple[pd.DataFrame, str]:
+    connection, allocations, sheet_name = read_google_sheet_best_table(
+        "Allocation History",
+        ["allocation", "dc1", "daily"],
+    )
+    if allocations.empty:
+        return pd.DataFrame(), ""
+
+    location_col = first_matching_column(allocations, [["location", "name"], ["destination"], ["mfc"]])
+    site_id_col = first_matching_column(allocations, [["site", "id"], ["location", "id"]])
+    gusto_col = first_matching_column(allocations, [["gusto"], ["po", "number"], ["to", "number"], ["order"]])
+    lane_col = first_matching_column(allocations, [["lane"], ["route"], ["carrier"]])
+    status_col = first_matching_column(allocations, [["status"], ["assign"]])
+    pallet_col = first_matching_column(allocations, [["pallet", "count"], ["pallets"], ["pallet"]])
+    weight_col = first_matching_column(allocations, [["weight"]])
+    date_col = first_matching_column(allocations, [["ship", "date"], ["planned", "ship"], ["date"]])
+    keep_map = {
+        "Active GUSTO": gusto_col,
+        "Active Location": location_col,
+        "Active Site ID": site_id_col,
+        "Active Lane": lane_col,
+        "Active Status": status_col,
+        "Active Pallets": pallet_col,
+        "Active Weight": weight_col,
+        "Active Ship Date": date_col,
+    }
+    keep_cols = [col for col in keep_map.values() if col]
+    if not keep_cols:
+        return pd.DataFrame(), sheet_name
+    result = allocations[keep_cols].copy()
+    result = result.rename(columns={source: target for target, source in keep_map.items() if source})
+    result["_site_id_key"] = result.get("Active Site ID", pd.Series("", index=result.index)).map(compact_site_id)
+    if not result["_site_id_key"].astype(str).str.strip().any():
+        result["_site_id_key"] = result.get("Active Location", pd.Series("", index=result.index)).map(compact_site_id)
+    result["_location_key"] = result.get("Active Location", pd.Series("", index=result.index)).map(compact_location_key)
+    result["_has_order"] = result.get("Active GUSTO", pd.Series("", index=result.index)).astype(str).str.strip().ne("")
+    result = result[result["_has_order"]].copy() if result["_has_order"].any() else result
+    return result.drop_duplicates(["_site_id_key", "_location_key"], keep="last"), sheet_name
+
+
+def build_sop_hypercare_context() -> tuple[pd.DataFrame, str]:
+    connection, hypercare, sheet_name = read_google_sheet_best_table("S&OP", ["hypercare", "dashboard", "site"])
+    if hypercare.empty:
+        return pd.DataFrame(), ""
+    location_col = first_matching_column(hypercare, [["location", "name"], ["site"], ["mfc"]])
+    site_id_col = first_matching_column(hypercare, [["location", "id"], ["site", "id"]])
+    status_col = first_matching_column(hypercare, [["status"], ["health"], ["risk"]])
+    action_col = first_matching_column(hypercare, [["action"], ["next", "step"], ["note"]])
+    keep_map = {
+        "Hypercare Location": location_col,
+        "Hypercare Site ID": site_id_col,
+        "Hypercare Status": status_col,
+        "Hypercare Action": action_col,
+    }
+    keep_cols = [col for col in keep_map.values() if col]
+    if not keep_cols:
+        return pd.DataFrame(), sheet_name
+    result = hypercare[keep_cols].copy()
+    result = result.rename(columns={source: target for target, source in keep_map.items() if source})
+    result["_site_id_key"] = result.get("Hypercare Site ID", pd.Series("", index=result.index)).map(compact_site_id)
+    result["_location_key"] = result.get("Hypercare Location", pd.Series("", index=result.index)).map(compact_location_key)
+    return result.drop_duplicates(["_site_id_key", "_location_key"], keep="last"), sheet_name
+
+
+def fill_context_by_profile_keys(base: pd.DataFrame, context: pd.DataFrame) -> pd.DataFrame:
+    """Fill profile rows from another sheet using site number first, location text second."""
+    if context.empty:
+        return base
+    result = base.copy()
+    context_cols = [col for col in context.columns if col not in {"_site_id_key", "_location_key", "_has_order"}]
+    for col in context_cols:
+        if col not in result.columns:
+            result[col] = ""
+
+    def blank_mask(series: pd.Series) -> pd.Series:
+        text = series.astype(str).str.strip()
+        return series.isna() | text.eq("") | text.str.casefold().isin({"nan", "none", "nat"})
+
+    for key_col in ["_site_id_key", "_location_key"]:
+        if key_col not in result.columns or key_col not in context.columns:
+            continue
+        keyed_context = context[context[key_col].astype(str).str.strip().ne("")].copy()
+        if keyed_context.empty:
+            continue
+        keyed_context = keyed_context.drop_duplicates(key_col, keep="last").set_index(key_col)
+        row_keys = result[key_col].astype(str)
+        for col in context_cols:
+            if col not in keyed_context.columns:
+                continue
+            mapped = row_keys.map(keyed_context[col])
+            result[col] = result[col].where(~blank_mask(result[col]), mapped)
+    return result
+
+
+def enrich_market_profile_operating_context(profile: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
+    enriched = profile.copy()
+    enriched["_site_id_key"] = enriched.get("Location ID", pd.Series("", index=enriched.index)).map(compact_site_id)
+    enriched["_location_key"] = enriched.get("Location Name", pd.Series("", index=enriched.index)).map(compact_location_key)
+    context_sources: dict[str, str] = {}
+
+    site_info, site_sheet = build_site_information_context()
+    if not site_info.empty:
+        context_sources["Site Information"] = site_sheet
+        enriched = fill_context_by_profile_keys(enriched, site_info)
+
+    allocations, allocation_sheet = build_allocation_operating_context()
+    if not allocations.empty:
+        context_sources["Allocation History"] = allocation_sheet
+        enriched = fill_context_by_profile_keys(enriched, allocations.drop(columns=["_has_order"], errors="ignore"))
+
+    hypercare, hypercare_sheet = build_sop_hypercare_context()
+    if not hypercare.empty:
+        context_sources["S&OP Hypercare"] = hypercare_sheet
+        enriched = fill_context_by_profile_keys(enriched, hypercare)
+
+    return enriched.drop(columns=["_site_id_key", "_location_key"], errors="ignore"), context_sources
+
+
+def render_operating_profile_gallery(filtered: pd.DataFrame, search: str) -> None:
+    if filtered.empty:
+        return
+    cards = []
+    for _, row in filtered.head(18).iterrows():
+        location_name = cell_text(row.get("Location Name"))
+        if not location_name:
+            continue
+        href = app_href("Operations", "Market Profiles", profile_type="mfc", profile_key=location_name, profile_search=search)
+        gusto = cell_text(row.get("Active GUSTO")) or "No active GUSTO"
+        status = cell_text(row.get("Active Status")) or "Reference profile"
+        lane = cell_text(row.get("Lane"))
+        leader = cell_text(row.get("Site Leader")) or cell_text(row.get("SCBP"))
+        cards.append(
+            f'<a class="gp-operating-card" href="{href}" target="_self">'
+            f'<div class="gp-operating-card__eyebrow">{html.escape(cell_text(row.get("Site")) or "MFC")}</div>'
+            f'<div class="gp-operating-card__title">{html.escape(location_name)}</div>'
+            f'<div class="gp-operating-card__meta">Lane {html.escape(lane or "Unmapped")} | {html.escape(status)}</div>'
+            f'<div class="gp-operating-card__gusto">{html.escape(gusto)}</div>'
+            f'<div class="gp-operating-card__footer">{html.escape(leader or "Owner not listed")}</div>'
+            f'</a>'
+        )
+    if cards:
+        st.markdown('<div class="gp-section-label">MFC Operating Gallery</div>', unsafe_allow_html=True)
+        st.markdown('<div class="gp-operating-gallery">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+
 def render_market_profile_detail(
     profile: pd.DataFrame,
     linehaul: pd.DataFrame,
@@ -6435,12 +6673,17 @@ def render_market_profile_detail(
         render_enterprise_kpi_grid(
             [
                 {"label": "MFCs", "value": format_number(len(lane_rows)), "delta": "Final-mile sites", "accent": "neutral"},
+                {"label": "Active GUSTOs", "value": format_number(lane_rows.get("Active GUSTO", pd.Series(dtype=str)).astype(str).str.strip().ne("").sum()), "delta": "Current allocation matches", "accent": "green"},
                 {"label": "Avg Pallets", "value": format_number(lane_rows.get("Avg Pallets", pd.Series(dtype=float)).sum()), "delta": "YTD per delivery", "accent": "green"},
                 {"label": "Avg Weight", "value": format_number(lane_rows.get("Avg Weight", pd.Series(dtype=float)).sum()), "delta": "YTD per delivery", "accent": "green"},
-                {"label": "Delivery Days", "value": format_number(lane_rows.get("Delivery Day", pd.Series(dtype=str)).nunique()), "delta": "Scheduled days", "accent": "neutral"},
             ],
             columns=4,
         )
+        active_cols = ["Site", "Location Name", "Active GUSTO", "Active Status", "Active Pallets", "Active Weight", "Active Ship Date", "Hypercare Status"]
+        active_rows = lane_rows[lane_rows.get("Active GUSTO", pd.Series("", index=lane_rows.index)).astype(str).str.strip().ne("")].copy()
+        if not active_rows.empty:
+            st.markdown('<div class="gp-section-label">Active GUSTOs In This Lane</div>', unsafe_allow_html=True)
+            st.dataframe(active_rows[[col for col in active_cols if col in active_rows.columns]], use_container_width=True, hide_index=True)
         sdt_windows = load_sdt_windows_for_lane(lane)
         if not sdt_windows.empty:
             st.markdown('<div class="gp-section-label">SDT Shipping Windows</div>', unsafe_allow_html=True)
@@ -6484,20 +6727,40 @@ def render_market_profile_detail(
                 "Location Name": row.get("Location Name"),
                 "Location ID": row.get("Location ID"),
                 "Lane": lane,
+                "Active GUSTO": row.get("Active GUSTO"),
+                "Active Status": row.get("Active Status"),
+                "Active Pallets": row.get("Active Pallets"),
+                "Active Weight": row.get("Active Weight"),
+                "Active Ship Date": row.get("Active Ship Date"),
                 "Delivery Day": row.get("Delivery Day"),
                 "Delivery Window": row.get("Delivery Window"),
                 "Average Pallets": row.get("Avg Pallets"),
                 "Average Weight": row.get("Avg Weight"),
                 "Full Address": row.get("Full Address"),
                 "Hours of Operation": row.get("Hours of Operation"),
+                "Site Leader": row.get("Site Leader"),
+                "Regional Manager": row.get("Regional Manager"),
                 "Region": row.get("Region"),
                 "Market": row.get("Market"),
                 "Current 3PL": row.get("Current 3PL"),
                 "Previous 3PL": row.get("Previous 3PL"),
                 "SCBP": row.get("SCBP"),
                 "Slack Channel": row.get("Slack Channel"),
+                "Hypercare Status": row.get("Hypercare Status"),
+                "Hypercare Action": row.get("Hypercare Action"),
             },
         )
+        active_order = {
+            "GUSTO / Order": row.get("Active GUSTO"),
+            "Allocation Status": row.get("Active Status"),
+            "Pallets": row.get("Active Pallets"),
+            "Weight": row.get("Active Weight"),
+            "Planned Ship Date": row.get("Active Ship Date"),
+            "Hypercare Status": row.get("Hypercare Status"),
+            "Hypercare Action": row.get("Hypercare Action"),
+        }
+        if any(cell_text(value) for value in active_order.values()):
+            render_field_table("Current Operating Object", active_order)
         sdt_windows = load_sdt_windows_for_lane(lane)
         if not sdt_windows.empty:
             st.markdown('<div class="gp-section-label">Lane SDT Shipping Windows</div>', unsafe_allow_html=True)
@@ -6635,6 +6898,12 @@ def render_market_profiles() -> None:
             profile = profile.merge(address[keep].rename(columns=rename).drop_duplicates("_location_key"), on="_location_key", how="left")
             profile = profile.drop(columns=["_location_key"], errors="ignore")
 
+    profile, operating_sources = enrich_market_profile_operating_context(profile)
+    if operating_sources:
+        source_text = " | ".join(f"{name}: {sheet}" for name, sheet in operating_sources.items() if sheet)
+        if source_text:
+            st.caption(f"Live profile enrichment: {source_text}")
+
     selected_type = get_query_param("profile_type")
     selected_key = get_query_param("profile_key")
     if selected_type and selected_key:
@@ -6662,19 +6931,26 @@ def render_market_profiles() -> None:
     metric_cols = st.columns(4)
     metric_cols[0].metric("Matched MFCs", format_number(len(filtered)))
     metric_cols[1].metric("Markets", format_number(filtered["Lane"].nunique()))
-    metric_cols[2].metric("Avg Pallets", format_number(filtered["Avg Pallets"].sum()))
-    metric_cols[3].metric("Avg Weight", format_number(filtered["Avg Weight"].sum()))
+    metric_cols[2].metric("Active GUSTOs", format_number(filtered.get("Active GUSTO", pd.Series("", index=filtered.index)).astype(str).str.strip().ne("").sum()))
+    metric_cols[3].metric("Avg Pallets", format_number(filtered["Avg Pallets"].sum()))
 
+    render_operating_profile_gallery(filtered, search)
     render_market_profile_result_links(filtered, search)
 
     display_cols = [
         "Site",
         "Location Name",
         "Lane",
+        "Active GUSTO",
+        "Active Status",
+        "Active Pallets",
         "Delivery Day",
         "Delivery Window",
         "Avg Pallets",
         "Avg Weight",
+        "Site Leader",
+        "Regional Manager",
+        "Hypercare Status",
         "Current 3PL",
         "Previous 3PL",
         "Current PPC",
