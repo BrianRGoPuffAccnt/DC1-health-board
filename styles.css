@@ -1164,6 +1164,22 @@ h1 {
   margin-top: 0.45rem;
 }
 
+.gp-embed-shell {
+  padding: 0.15rem 0.2rem 0.5rem;
+}
+
+.gp-embed-shell .gp-enterprise-hero {
+  margin-top: 0;
+}
+
+.gp-embed-shell .gp-kpi-grid {
+  margin-bottom: 0.8rem;
+}
+
+.gp-embed-shell .gp-brief-panel {
+  margin-top: 0.75rem;
+}
+
 .stAlert {
   border-radius: 8px;
 }

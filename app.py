@@ -188,6 +188,17 @@ NAVIGATION = {
         "PDF Locker",
     ],
 }
+EMBED_TARGETS = {
+    "home_live_metrics": "Home Live Metrics",
+    "live_metrics": "Home Live Metrics",
+    "daily_health": "Daily Health Check",
+    "transportation_control": "Transportation Control",
+    "transportation_allocations": "Transportation Control",
+    "executive_brief": "Executive Brief",
+    "executive_briefs": "Executive Brief",
+    "market_profiles": "Market Profiles",
+    "resource_library": "Resource Library Profiles",
+}
 COMMAND_CENTER_DEFAULTS = {
     "created": 0,
     "cancelled": 0,
@@ -2623,7 +2634,8 @@ def render_open_tos_drilldown(context: DailyHealthContext) -> None:
     if not carrier:
         return
     detail = build_open_to_detail(context, carrier)
-    close_href = app_href("Home", "Live Update")
+    embed_mode = get_query_param("embed")
+    close_href = app_href("Home", "Live Update", embed=embed_mode) if embed_mode else app_href("Home", "Live Update")
     st.markdown(
         f"""
         <div class="gp-drilldown-panel">
@@ -2706,7 +2718,12 @@ def render_enterprise_risk_cards(risks: pd.DataFrame) -> None:
         window = str(row.get("Window Status", "Window review"))
         status_class = "red" if "Past" in timing or "Past" in window else "yellow"
         carrier = str(row.get("Carrier", "Unknown Carrier"))
-        open_tos_href = app_href("Home", "Live Update", open_tos=carrier)
+        embed_mode = get_query_param("embed")
+        open_tos_href = (
+            app_href("Home", "Live Update", open_tos=carrier, embed=embed_mode)
+            if embed_mode
+            else app_href("Home", "Live Update", open_tos=carrier)
+        )
         details = [
             (f'<a class="gp-risk-card__metric-link" href="{open_tos_href}" target="_self">Open TOs</a>', format_number(row.get("Open TOs", 0))),
             ("Lines", format_number(row.get("Lines_Remaining", 0))),
@@ -6391,13 +6408,14 @@ def render_market_profile_result_links(filtered: pd.DataFrame, search: str) -> N
     if filtered.empty:
         st.info("No market profile matches found.")
         return
+    embed_mode = get_query_param("embed")
     lane_cards = []
     for _, row in filtered[["Lane"]].dropna().drop_duplicates().head(8).iterrows():
         lane = cell_text(row.get("Lane"))
         if not lane:
             continue
         lane_rows = filtered[filtered["Lane"].astype(str).eq(lane)]
-        href = app_href("Operations", "Market Profiles", profile_type="lane", profile_key=lane, profile_search=search)
+        href = app_href("Operations", "Market Profiles", profile_type="lane", profile_key=lane, profile_search=search, embed=embed_mode)
         lane_cards.append(
             f'<a class="gp-profile-link-card" href="{href}" target="_self"><span>Lane</span><strong>{html.escape(lane)}</strong>'
             f'<small>{len(lane_rows):,} MFC(s) | {format_number(lane_rows.get("Avg Pallets", pd.Series(dtype=float)).sum())} avg pallets</small></a>'
@@ -6407,7 +6425,7 @@ def render_market_profile_result_links(filtered: pd.DataFrame, search: str) -> N
         location_name = cell_text(row.get("Location Name"))
         if not location_name:
             continue
-        href = app_href("Operations", "Market Profiles", profile_type="mfc", profile_key=location_name, profile_search=search)
+        href = app_href("Operations", "Market Profiles", profile_type="mfc", profile_key=location_name, profile_search=search, embed=embed_mode)
         mfc_cards.append(
             f'<a class="gp-profile-link-card" href="{href}" target="_self"><span>MFC Profile</span><strong>{html.escape(cell_text(row.get("Site")) or location_name)}</strong>'
             f'<small>{html.escape(location_name)} | Lane {html.escape(cell_text(row.get("Lane")))}</small></a>'
@@ -6422,6 +6440,16 @@ def render_field_table(title: str, values: dict[str, object]) -> None:
     if rows:
         st.markdown(f'<div class="gp-section-label">{html.escape(title)}</div>', unsafe_allow_html=True)
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def render_embed_catalog() -> None:
+    rows = [
+        {"Embed Target": key, "Google Sites Placement": label, "URL Parameter": f"?embed={key}"}
+        for key, label in EMBED_TARGETS.items()
+    ]
+    st.subheader("Google Sites Embed Targets")
+    st.caption("Use these focused views when placing Streamlit modules into Google Sites.")
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def compact_location_key(value: object) -> str:
@@ -6621,12 +6649,13 @@ def enrich_market_profile_operating_context(profile: pd.DataFrame) -> tuple[pd.D
 def render_operating_profile_gallery(filtered: pd.DataFrame, search: str) -> None:
     if filtered.empty:
         return
+    embed_mode = get_query_param("embed")
     cards = []
     for _, row in filtered.head(18).iterrows():
         location_name = cell_text(row.get("Location Name"))
         if not location_name:
             continue
-        href = app_href("Operations", "Market Profiles", profile_type="mfc", profile_key=location_name, profile_search=search)
+        href = app_href("Operations", "Market Profiles", profile_type="mfc", profile_key=location_name, profile_search=search, embed=embed_mode)
         gusto = cell_text(row.get("Active GUSTO")) or "No active GUSTO"
         status = cell_text(row.get("Active Status")) or "Reference profile"
         lane = cell_text(row.get("Lane"))
@@ -6652,7 +6681,12 @@ def render_market_profile_detail(
     selected_type: str,
     selected_key: str,
 ) -> None:
-    back_href = app_href("Operations", "Market Profiles", profile_search=get_query_param("profile_search"))
+    back_href = app_href(
+        "Operations",
+        "Market Profiles",
+        profile_search=get_query_param("profile_search"),
+        embed=get_query_param("embed"),
+    )
     selected_type = selected_type.casefold()
     selected_key = cell_text(selected_key)
     if selected_type == "lane":
@@ -6971,6 +7005,106 @@ def render_market_profiles() -> None:
             "Avg Weight": st.column_config.NumberColumn("Avg Weight", format="%,.0f"),
         },
     )
+
+
+def empty_ops_data() -> dict[str, pd.DataFrame]:
+    return {"daily": pd.DataFrame(), "weekly": pd.DataFrame()}
+
+
+def empty_tender_pipeline() -> dict[str, pd.DataFrame]:
+    return {
+        "records": pd.DataFrame(columns=TENDER_VALIDATION_COLUMNS),
+        "ready": pd.DataFrame(columns=TENDER_VALIDATION_COLUMNS),
+        "issues": pd.DataFrame(columns=TENDER_VALIDATION_COLUMNS),
+        "duplicates": pd.DataFrame(columns=TENDER_VALIDATION_COLUMNS),
+        "conflicts": pd.DataFrame(columns=TENDER_VALIDATION_COLUMNS),
+        "export": pd.DataFrame(columns=TENDER_EXPORT_COLUMNS),
+    }
+
+
+def render_embed_transportation_control(context: DailyHealthContext) -> None:
+    status = "Waiting"
+    if not context.progress.empty:
+        status = str(summarize_daily_health_progress(context.progress)["status"])
+    render_enterprise_module_header(
+        "Transportation Control",
+        "DC1 Shipping Window Control",
+        "Focused Google Sites module for SDT window, OB Tracker, and carrier progress signals.",
+        status,
+        f"OB tab {context.ob_sheet or 'not selected'} | {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+    )
+    if context.progress.empty:
+        st.info("Transportation Control is waiting on SDT Schedule and OB TO Tracker data.")
+        return
+
+    summary = summarize_daily_health_progress(context.progress)
+    render_enterprise_kpi_grid(
+        [
+            {"label": "Routes", "value": format_number(summary["total_routes"]), "delta": "Matched carrier lanes", "accent": "neutral"},
+            {"label": "Loaded TOs", "value": f"{format_number(summary['loaded'])} / {format_number(summary['total_tos'])}", "delta": format_percent(summary["completion"]), "accent": "green" if float(summary["completion"]) >= 0.9 else "yellow"},
+            {"label": "Open TOs", "value": format_number(summary["open_tos"]), "delta": "Remaining load work", "accent": "yellow" if int(summary["open_tos"]) else "green"},
+            {"label": "Past Departure", "value": format_number(summary["past"]), "delta": "Routes beyond SDT", "accent": "red" if int(summary["past"]) else "green"},
+        ],
+        columns=4,
+    )
+    st.markdown('<div class="gp-section-label">Carrier Window Progress</div>', unsafe_allow_html=True)
+    display_cols = [
+        "Carrier",
+        "Window Status",
+        "Load Ready Time",
+        "Departure Time",
+        "TOs",
+        "Loaded",
+        "Open TOs",
+        "Lines_Remaining",
+        "Progress %",
+        "Timing Risk",
+    ]
+    display = context.progress[[col for col in display_cols if col in context.progress.columns]].copy()
+    if "Open TOs" in display.columns:
+        display = display.sort_values("Open TOs", ascending=False)
+    st.dataframe(
+        display.head(25),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Progress %": st.column_config.ProgressColumn("Progress %", format="%.0f%%", min_value=0, max_value=1),
+        },
+    )
+
+
+def render_google_sites_embed(embed_mode: str) -> None:
+    st.markdown('<div class="gp-embed-shell">', unsafe_allow_html=True)
+    install_google_refresh_timer()
+    if "google_sheet_secret_seed_checked" not in st.session_state:
+        seed_google_sheet_connections_from_secrets()
+        st.session_state["google_sheet_secret_seed_checked"] = True
+    run_scheduled_google_refresh_if_due()
+
+    context = load_daily_health_context()
+    command_center = latest_command_center_snapshot()
+    ops_data = empty_ops_data()
+    health = compute_health(
+        command_center,
+        pd.DataFrame(columns=["Carrier", "Status", "Notes"]),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        ops_data,
+    )
+
+    if embed_mode in {"home_live_metrics", "live_metrics"}:
+        render_live_update(context)
+    elif embed_mode == "daily_health":
+        render_executive_briefs_view(context, health, ops_data)
+    elif embed_mode in {"transportation_control", "transportation_allocations"}:
+        render_embed_transportation_control(context)
+    elif embed_mode in {"executive_brief", "executive_briefs"}:
+        render_executive_briefs_view(context, health, ops_data)
+    elif embed_mode in {"market_profiles", "resource_library"}:
+        render_market_profiles()
+    else:
+        render_embed_catalog()
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_cost_lane_intelligence() -> None:
@@ -7393,6 +7527,10 @@ def main() -> None:
     init_db()
     st.set_page_config(page_title=APP_TITLE, page_icon=str(LOGO_PATH), layout="wide")
     inject_brand_styles()
+    embed_mode = get_query_param("embed").strip().casefold()
+    if embed_mode:
+        render_google_sites_embed(embed_mode)
+        return
     render_sidebar_brand()
     render_brand_header()
     st.title(APP_TITLE)
