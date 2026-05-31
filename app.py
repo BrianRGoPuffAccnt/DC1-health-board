@@ -200,6 +200,8 @@ EMBED_TARGETS = {
     "transportation_allocations": "Transportation Control",
     "executive_brief": "Executive Brief",
     "executive_briefs": "Executive Brief",
+    "executive_shipping_readiness": "Executive Shipping Readiness Brief",
+    "executive_briefing_center": "Executive Shipping Readiness Brief",
     "executive_summary": "Executive Brief Summary",
     "executive_watchlist": "Executive Route Watchlist",
     "executive_pallets": "Executive Pallet Readiness",
@@ -7827,7 +7829,7 @@ def render_google_sites_embed(embed_mode: str) -> None:
         render_daily_ops_labor_embed(context)
     elif embed_mode in {"transportation_control", "transportation_allocations"}:
         render_embed_transportation_control(context)
-    elif embed_mode in {"executive_brief", "executive_briefs"}:
+    elif embed_mode in {"executive_brief", "executive_briefs", "executive_shipping_readiness", "executive_briefing_center"}:
         render_executive_briefs_view(context, health, ops_data)
     elif embed_mode in {"executive_summary", "executive_brief_summary"}:
         render_executive_summary_embed(context, health, ops_data)
