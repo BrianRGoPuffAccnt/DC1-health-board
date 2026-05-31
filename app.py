@@ -196,7 +196,12 @@ EMBED_TARGETS = {
     "transportation_allocations": "Transportation Control",
     "executive_brief": "Executive Brief",
     "executive_briefs": "Executive Brief",
+    "executive_summary": "Executive Brief Summary",
+    "executive_watchlist": "Executive Route Watchlist",
+    "executive_pallets": "Executive Pallet Readiness",
+    "executive_note": "Executive Copy-Ready Note",
     "market_profiles": "Market Profiles",
+    "mfc_network_map": "MFC Network Map",
     "resource_library": "Resource Library Profiles",
 }
 COMMAND_CENTER_DEFAULTS = {
@@ -215,34 +220,96 @@ COMMAND_CENTER_ALIASES = {
     "dt_over_60": ["dt_over_60", "dt_60", "dt_greater_than_60", "dt_60m", "dt_over_60m"],
 }
 MFC_MARKET_COORDS = {
+    "ATL": (33.7490, -84.3880, "Atlanta, GA"),
+    "AUS": (30.2672, -97.7431, "Austin, TX"),
     "BFL": (35.3733, -119.0187, "Bakersfield, CA"),
     "BNA": (36.1627, -86.7816, "Nashville, TN"),
     "BOS": (42.3601, -71.0589, "Boston, MA"),
     "BTR": (30.4515, -91.1871, "Baton Rouge, LA"),
     "BUR": (34.1808, -118.3090, "Burbank, CA"),
+    "BWG": (36.9685, -86.4808, "Bowling Green, KY"),
     "BWI": (39.2904, -76.6122, "Baltimore, MD"),
+    "CAE": (34.0007, -81.0348, "Columbia, SC"),
+    "CHO": (38.0293, -78.4767, "Charlottesville, VA"),
+    "CID": (41.9779, -91.6656, "Cedar Rapids, IA"),
+    "CLE": (41.4993, -81.6944, "Cleveland, OH"),
+    "CLL": (30.6279, -96.3344, "College Station, TX"),
+    "CLT": (35.2271, -80.8431, "Charlotte, NC"),
+    "CMH": (39.9612, -82.9988, "Columbus, OH"),
+    "CMI": (40.1164, -88.2434, "Champaign / Urbana, IL"),
+    "CVG": (39.1031, -84.5120, "Cincinnati, OH"),
+    "DAL": (32.7767, -96.7970, "Dallas, TX"),
     "DCA": (38.9072, -77.0369, "Washington, DC"),
     "DEN": (39.7392, -104.9903, "Denver, CO"),
+    "DFW": (32.7767, -96.7970, "Dallas / Fort Worth, TX"),
     "DSM": (41.5868, -93.6250, "Des Moines, IA"),
+    "DTW": (42.3314, -83.0458, "Detroit, MI"),
+    "ELP": (31.7619, -106.4850, "El Paso, TX"),
+    "EUG": (44.0521, -123.0868, "Eugene, OR"),
+    "FAT": (36.7378, -119.7871, "Fresno, CA"),
+    "FLG": (35.1983, -111.6513, "Flagstaff, AZ"),
+    "FLL": (26.1224, -80.1373, "Fort Lauderdale, FL"),
+    "GNV": (29.6516, -82.3248, "Gainesville, FL"),
+    "GSO": (36.0726, -79.7920, "Greensboro, NC"),
     "HVN": (41.3083, -72.9279, "New Haven, CT"),
+    "IAH": (29.7604, -95.3698, "Houston, TX"),
+    "IND": (39.7684, -86.1581, "Indianapolis, IN"),
+    "JAX": (30.3322, -81.6557, "Jacksonville, FL"),
     "JFK": (40.6782, -73.9442, "Brooklyn / Queens, NY"),
+    "LAN": (42.7325, -84.5555, "Lansing, MI"),
+    "LAS": (36.1699, -115.1398, "Las Vegas, NV"),
+    "LAX": (34.0522, -118.2437, "Los Angeles, CA"),
+    "LBB": (33.5779, -101.8552, "Lubbock, TX"),
+    "LEX": (38.0406, -84.5037, "Lexington, KY"),
+    "LGB": (33.7701, -118.1937, "Long Beach, CA"),
+    "LNK": (40.8136, -96.7026, "Lincoln, NE"),
+    "LOU": (38.2527, -85.7585, "Louisville, KY"),
+    "MCI": (39.0997, -94.5786, "Kansas City, MO"),
+    "MCO": (28.5383, -81.3792, "Orlando, FL"),
     "MDT": (40.2732, -76.8867, "Harrisburg, PA"),
     "MEM": (35.1495, -90.0490, "Memphis, TN"),
+    "MFR": (42.3265, -122.8756, "Medford, OR"),
+    "MIA": (25.7617, -80.1918, "Miami, FL"),
+    "MKE": (43.0389, -87.9065, "Milwaukee, WI"),
+    "MOR": (39.6295, -79.9559, "Morgantown, WV"),
+    "MSN": (43.0731, -89.4012, "Madison, WI"),
+    "MSP": (44.9778, -93.2650, "Minneapolis, MN"),
     "MSY": (29.9511, -90.0715, "New Orleans, LA"),
     "OAK": (37.8044, -122.2712, "Oakland, CA"),
+    "OKC": (35.4676, -97.5164, "Oklahoma City, OK"),
     "ONT": (34.0633, -117.6509, "Ontario, CA"),
     "ORD": (41.8781, -87.6298, "Chicago, IL"),
+    "ORF": (36.8508, -76.2859, "Norfolk, VA"),
+    "PDX": (45.5152, -122.6784, "Portland, OR"),
     "PHL": (39.9526, -75.1652, "Philadelphia, PA"),
+    "PHX": (33.4484, -112.0740, "Phoenix, AZ"),
+    "PIE": (27.7731, -82.6403, "St. Petersburg, FL"),
     "PIT": (40.4406, -79.9959, "Pittsburgh, PA"),
+    "PNS": (30.4213, -87.2169, "Pensacola, FL"),
+    "PSP": (33.8303, -116.5453, "Palm Springs, CA"),
     "PVD": (41.8240, -71.4128, "Providence, RI"),
+    "RDU": (35.7796, -78.6382, "Raleigh / Durham, NC"),
     "RDD": (40.5865, -122.3917, "Redding, CA"),
     "RIC": (37.5407, -77.4360, "Richmond, VA"),
+    "RNO": (39.5296, -119.8138, "Reno, NV"),
+    "ROC": (43.1566, -77.6088, "Rochester, NY"),
     "SAN": (32.7157, -117.1611, "San Diego, CA"),
+    "SAT": (29.4241, -98.4936, "San Antonio, TX"),
+    "SBA": (34.4208, -119.6982, "Santa Barbara, CA"),
+    "SBD": (34.1083, -117.2898, "San Bernardino, CA"),
+    "SBN": (41.6764, -86.2520, "South Bend, IN"),
+    "SBP": (35.2828, -120.6596, "San Luis Obispo, CA"),
+    "SEA": (47.6062, -122.3321, "Seattle, WA"),
     "SFO": (37.7749, -122.4194, "San Francisco, CA"),
     "SGF": (37.2089, -93.2923, "Springfield, MO"),
     "SJC": (37.3382, -121.8863, "San Jose, CA"),
+    "SLE": (44.9429, -123.0351, "Salem, OR"),
     "SMF": (38.5816, -121.4944, "Sacramento, CA"),
+    "SNA": (33.7455, -117.8677, "Orange County, CA"),
     "STL": (38.6270, -90.1994, "St. Louis, MO"),
+    "TPA": (27.9506, -82.4572, "Tampa, FL"),
+    "TUL": (36.1540, -95.9928, "Tulsa, OK"),
+    "TUS": (32.2226, -110.9747, "Tucson, AZ"),
     "TYS": (35.9606, -83.9207, "Knoxville, TN"),
 }
 
@@ -3181,6 +3248,103 @@ def render_executive_briefs_view(context: DailyHealthContext, health: HealthResu
                 st.caption("Fill Rate source is not matched yet.")
 
     render_brief_panel("Copy-ready executive brief", brief)
+
+
+def render_executive_summary_embed(context: DailyHealthContext, health: HealthResult, ops_data: dict[str, pd.DataFrame]) -> None:
+    status = health.label
+    if not context.progress.empty:
+        status = str(summarize_daily_health_progress(context.progress)["status"])
+    render_enterprise_module_header(
+        "Executive Briefing Center",
+        "DC1 Shipping Readiness Summary",
+        "Compact leadership-ready status block for the Executive Briefs page.",
+        status,
+        f"Prepared {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+    )
+    if context.progress.empty:
+        st.info("Executive summary is waiting on SDT Schedule and OB TO Tracker data.")
+        return
+    summary = summarize_daily_health_progress(context.progress)
+    render_enterprise_kpi_grid(
+        [
+            {"label": "Shipping Health", "value": str(summary["status"]), "delta": "Executive status", "accent": str(summary["status"])},
+            {"label": "Loaded", "value": format_percent(summary["completion"]), "delta": f"{format_number(summary['loaded'])} loaded TOs", "accent": "green" if float(summary["completion"]) >= 0.9 else "yellow"},
+            {"label": "Open TOs", "value": format_number(summary["open_tos"]), "delta": "Carrier load progress", "accent": "yellow" if int(summary["open_tos"]) else "green"},
+            {"label": "Past Departure", "value": format_number(summary["past"]), "delta": "Routes beyond SDT", "accent": "red" if int(summary["past"]) else "green"},
+        ],
+        columns=4,
+    )
+
+
+def render_executive_watchlist_embed(context: DailyHealthContext) -> None:
+    render_enterprise_module_header(
+        "Executive Briefing Center",
+        "Route Watchlist",
+        "Focused view of carriers and SDT windows needing leadership attention.",
+        str(summarize_daily_health_progress(context.progress)["status"]) if not context.progress.empty else "Waiting",
+        f"OB tab {context.ob_sheet or 'not selected'}",
+    )
+    if context.progress.empty:
+        st.info("Route watchlist is waiting on SDT Schedule and OB TO Tracker data.")
+        return
+    render_outstanding_site_blocks(context)
+    risks = top_daily_health_risks(context.progress, 8)
+    if not risks.empty:
+        st.markdown('<div class="gp-section-label">Top Route Risks</div>', unsafe_allow_html=True)
+        st.dataframe(risks, use_container_width=True, hide_index=True)
+
+
+def render_executive_pallet_embed(context: DailyHealthContext) -> None:
+    status = str(summarize_daily_health_progress(context.progress)["status"]) if not context.progress.empty else "Waiting"
+    render_enterprise_module_header(
+        "Executive Briefing Center",
+        "Pallet Readiness",
+        "Fill-rate and pallet exception view for routes not ready to load.",
+        status,
+        f"Prepared {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+    )
+    if context.progress.empty:
+        st.info("Pallet readiness is waiting on Fill Rate and OB Tracker data.")
+        return
+    pallet_cols = [col for col in ["Carrier", "Units_NYP", "PO_WO_Pallets", "Avg_Fill_Rate", "Pallet Readiness Risk", "Open TOs", "Timing Risk"] if col in context.progress.columns]
+    if not pallet_cols:
+        st.info("No pallet readiness columns are available yet.")
+        return
+    pallet_display = context.progress[pallet_cols].copy()
+    sort_cols = [col for col in ["Units_NYP", "PO_WO_Pallets", "Open TOs"] if col in pallet_display.columns]
+    if sort_cols:
+        pallet_display = pallet_display.sort_values(sort_cols, ascending=False)
+    if "Units_NYP" in pallet_display.columns and pd.to_numeric(pallet_display["Units_NYP"], errors="coerce").fillna(0).gt(0).any():
+        chart = pallet_display.head(12).copy()
+        fig = px.bar(
+            chart,
+            y="Carrier",
+            x="Units_NYP",
+            color="Pallet Readiness Risk" if "Pallet Readiness Risk" in chart.columns else None,
+            orientation="h",
+            color_discrete_map={"Normal": "#2f6f4e", "Units NYP": "#b7791f", "PO Without Pallets": "#b42318", "No Fill Rate Match": "#64748b"},
+        )
+        fig.update_layout(
+            height=360,
+            margin=dict(l=10, r=10, t=10, b=10),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(autorange="reversed"),
+            font=dict(color="#1f2937"),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(pallet_display.head(25), use_container_width=True, hide_index=True)
+
+
+def render_executive_note_embed(context: DailyHealthContext, health: HealthResult, ops_data: dict[str, pd.DataFrame]) -> None:
+    render_enterprise_module_header(
+        "Executive Briefing Center",
+        "Copy-Ready Briefing Note",
+        "One-block leadership note for the Executive Briefs page.",
+        str(summarize_daily_health_progress(context.progress)["status"]) if not context.progress.empty else health.label,
+        f"Prepared {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+    )
+    render_brief_panel("Copy-ready executive brief", make_executive_daily_brief(context, health, ops_data))
 
 
 def parse_google_sheet_id(value: str) -> str:
@@ -6683,6 +6847,125 @@ def render_operating_profile_gallery(filtered: pd.DataFrame, search: str) -> Non
         st.markdown('<div class="gp-operating-gallery">' + "".join(cards) + "</div>", unsafe_allow_html=True)
 
 
+def mfc_profile_market_prefix(row: pd.Series) -> str:
+    for col in ["Location Name", "Site Info Location Name", "Active Location", "Site"]:
+        prefix = site_market_prefix(row.get(col))
+        if prefix:
+            return prefix
+    for col in ["Lane", "Active Lane", "Site Info Lane"]:
+        text = cell_text(row.get(col)).upper()
+        for token in MFC_MARKET_COORDS:
+            if re.search(rf"\b{re.escape(token)}\b", text):
+                return token
+    return ""
+
+
+def build_mfc_profile_map_data(profile: pd.DataFrame, focus: pd.DataFrame | None = None) -> pd.DataFrame:
+    if profile.empty:
+        return pd.DataFrame()
+    focus = focus if focus is not None else pd.DataFrame()
+    nodes = profile.copy()
+    nodes["market_prefix"] = nodes.apply(mfc_profile_market_prefix, axis=1)
+    nodes = nodes[nodes["market_prefix"].isin(MFC_MARKET_COORDS)].copy()
+    if nodes.empty:
+        return nodes
+
+    nodes["latitude"] = nodes["market_prefix"].map(lambda prefix: MFC_MARKET_COORDS[prefix][0])
+    nodes["longitude"] = nodes["market_prefix"].map(lambda prefix: MFC_MARKET_COORDS[prefix][1])
+    nodes["Market Node"] = nodes["market_prefix"].map(lambda prefix: MFC_MARKET_COORDS[prefix][2])
+    nodes["Node Label"] = nodes.get("Site", pd.Series("", index=nodes.index)).map(cell_text)
+    nodes["Node Label"] = nodes["Node Label"].where(nodes["Node Label"].str.strip().ne(""), nodes.get("Location Name", pd.Series("", index=nodes.index)).map(cell_text))
+    nodes["Active GUSTO Display"] = nodes.get("Active GUSTO", pd.Series("", index=nodes.index)).map(cell_text).replace("", "No active GUSTO")
+    nodes["Carrier / Lane"] = nodes.get("Lane", pd.Series("", index=nodes.index)).map(cell_text)
+    nodes["Carrier / Lane"] = nodes["Carrier / Lane"].where(nodes["Carrier / Lane"].str.strip().ne(""), nodes.get("Active Lane", pd.Series("", index=nodes.index)).map(cell_text))
+
+    nodes["_map_key"] = nodes.get("Location Name", pd.Series("", index=nodes.index)).map(compact_location_key)
+    nodes["_site_key"] = nodes.get("Location ID", pd.Series("", index=nodes.index)).map(compact_site_id)
+    focus_keys = set()
+    focus_site_keys = set()
+    if focus is not None and not focus.empty:
+        focus_keys = {
+            key
+            for key in focus.get("Location Name", pd.Series("", index=focus.index)).map(compact_location_key)
+            if key
+        }
+        focus_site_keys = {
+            key
+            for key in focus.get("Location ID", pd.Series("", index=focus.index)).map(compact_site_id)
+            if key
+        }
+
+    has_active = nodes.get("Active GUSTO", pd.Series("", index=nodes.index)).map(cell_text).str.strip().ne("")
+    is_focus = nodes["_map_key"].isin(focus_keys) | nodes["_site_key"].isin(focus_site_keys)
+    nodes["Map Status"] = "Reference Node"
+    nodes.loc[has_active, "Map Status"] = "Active GUSTO"
+    nodes.loc[is_focus, "Map Status"] = "Focused Result"
+    nodes["Node Size"] = 10
+    nodes.loc[has_active, "Node Size"] = 18
+    nodes.loc[is_focus, "Node Size"] = 26
+
+    nodes["_rank"] = nodes.groupby("market_prefix").cumcount()
+    nodes["latitude"] = nodes["latitude"] + ((nodes["_rank"] % 5) - 2) * 0.08
+    nodes["longitude"] = nodes["longitude"] + (((nodes["_rank"] // 5) % 5) - 2) * 0.11
+    return nodes
+
+
+def render_mfc_network_map(profile: pd.DataFrame, focus: pd.DataFrame | None = None, title: str = "MFC Network Map") -> None:
+    map_data = build_mfc_profile_map_data(profile, focus)
+    st.markdown(f'<div class="gp-section-label">{html.escape(title)}</div>', unsafe_allow_html=True)
+    if map_data.empty:
+        st.info("MFC map is waiting on market/location fields from the Training Cheat Sheet or Site Information sheet.")
+        return
+
+    focus_data = map_data[map_data["Map Status"].eq("Focused Result")].copy()
+    center_source = focus_data if not focus_data.empty else map_data
+    projection_scale = 4.0 if focus is not None and not focus.empty else 2.4
+    hover_data = {
+        "Location Name": True,
+        "Carrier / Lane": True,
+        "Active GUSTO Display": True,
+        "latitude": False,
+        "longitude": False,
+        "Node Size": False,
+    }
+    for optional_col in ["Active Status", "Active Pallets", "Active Ship Date", "Full Address"]:
+        if optional_col in map_data.columns:
+            hover_data[optional_col] = True
+    fig = px.scatter_geo(
+        map_data,
+        lat="latitude",
+        lon="longitude",
+        size="Node Size",
+        color="Map Status",
+        hover_name="Node Label",
+        hover_data=hover_data,
+        color_discrete_map={
+            "Focused Result": "#b42318",
+            "Active GUSTO": "#2f6f4e",
+            "Reference Node": "#64748b",
+        },
+        scope="usa",
+    )
+    fig.update_traces(marker=dict(line=dict(width=1.5, color="#ffffff"), opacity=0.88))
+    fig.update_layout(
+        height=430,
+        margin=dict(l=0, r=0, t=10, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=-0.04),
+        geo=dict(
+            bgcolor="rgba(0,0,0,0)",
+            landcolor="#edf2f7",
+            lakecolor="#dbeafe",
+            subunitcolor="#cbd5e1",
+            center=dict(lat=float(center_source["latitude"].mean()), lon=float(center_source["longitude"].mean())),
+            projection=dict(scale=projection_scale),
+        ),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Map nodes use MFC market prefixes with available site/profile enrichment; active GUSTO context comes from the Allocation History connection when present.")
+
+
 def render_market_profile_detail(
     profile: pd.DataFrame,
     linehaul: pd.DataFrame,
@@ -6722,6 +7005,7 @@ def render_market_profile_detail(
             ],
             columns=4,
         )
+        render_mfc_network_map(profile, lane_rows, "Lane MFC Node Map")
         active_cols = ["Site", "Location Name", "Active GUSTO", "Active Status", "Active Pallets", "Active Weight", "Active Ship Date", "Hypercare Status"]
         active_rows = lane_rows[lane_rows.get("Active GUSTO", pd.Series("", index=lane_rows.index)).astype(str).str.strip().ne("")].copy()
         if not active_rows.empty:
@@ -6804,6 +7088,7 @@ def render_market_profile_detail(
         }
         if any(cell_text(value) for value in active_order.values()):
             render_field_table("Current Operating Object", active_order)
+        render_mfc_network_map(profile, mfc_rows.head(1), "MFC Node Focus")
         sdt_windows = load_sdt_windows_for_lane(lane)
         if not sdt_windows.empty:
             st.markdown('<div class="gp-section-label">Lane SDT Shipping Windows</div>', unsafe_allow_html=True)
@@ -6977,6 +7262,7 @@ def render_market_profiles() -> None:
     metric_cols[2].metric("Active GUSTOs", format_number(filtered.get("Active GUSTO", pd.Series("", index=filtered.index)).astype(str).str.strip().ne("").sum()))
     metric_cols[3].metric("Avg Pallets", format_number(filtered["Avg Pallets"].sum()))
 
+    render_mfc_network_map(profile, filtered if search.strip() else pd.DataFrame(), "MFC Network Map")
     render_operating_profile_gallery(filtered, search)
     render_market_profile_result_links(filtered, search)
 
@@ -7109,7 +7395,15 @@ def render_google_sites_embed(embed_mode: str) -> None:
         render_embed_transportation_control(context)
     elif embed_mode in {"executive_brief", "executive_briefs"}:
         render_executive_briefs_view(context, health, ops_data)
-    elif embed_mode in {"market_profiles", "resource_library"}:
+    elif embed_mode in {"executive_summary", "executive_brief_summary"}:
+        render_executive_summary_embed(context, health, ops_data)
+    elif embed_mode in {"executive_watchlist", "executive_route_watchlist"}:
+        render_executive_watchlist_embed(context)
+    elif embed_mode in {"executive_pallets", "executive_pallet_readiness"}:
+        render_executive_pallet_embed(context)
+    elif embed_mode in {"executive_note", "leadership_brief"}:
+        render_executive_note_embed(context, health, ops_data)
+    elif embed_mode in {"market_profiles", "mfc_network_map", "resource_library"}:
         render_market_profiles()
     else:
         render_embed_catalog()
