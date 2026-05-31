@@ -5,6 +5,7 @@ import html
 import json
 import re
 import sqlite3
+from difflib import SequenceMatcher
 from urllib.parse import quote
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -201,6 +202,8 @@ EMBED_TARGETS = {
     "executive_pallets": "Executive Pallet Readiness",
     "executive_note": "Executive Copy-Ready Note",
     "market_profiles": "Market Profiles",
+    "mfc_lookup": "MFC Lookup",
+    "mfc_profiles": "MFC Profiles",
     "mfc_network_map": "MFC Network Map",
     "resource_library": "Resource Library Profiles",
 }
@@ -6615,6 +6618,167 @@ def render_field_table(title: str, values: dict[str, object]) -> None:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+def first_nonblank(row: pd.Series, columns: list[str], default: str = "") -> str:
+    for col in columns:
+        value = cell_text(row.get(col))
+        if value:
+            return value
+    return default
+
+
+def render_profile_panel_grid(panels: list[dict[str, object]]) -> None:
+    cards = []
+    for panel in panels:
+        title = cell_text(panel.get("title"))
+        items = panel.get("items") or {}
+        if not isinstance(items, dict):
+            continue
+        rows = []
+        for label, value in items.items():
+            display = cell_text(value)
+            if display:
+                rows.append(
+                    f'<div class="gp-profile-panel__row"><span>{html.escape(str(label))}</span>'
+                    f"<strong>{html.escape(display)}</strong></div>"
+                )
+        if not rows:
+            continue
+        cards.append(
+            f'<section class="gp-profile-panel"><div class="gp-profile-panel__title">{html.escape(title)}</div>'
+            + "".join(rows)
+            + "</section>"
+        )
+    if cards:
+        st.markdown('<div class="gp-profile-panel-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+
+def render_profile_source_fields(row: pd.Series, source_prefixes: list[str]) -> None:
+    rows = []
+    for col, value in row.items():
+        if not any(str(col).startswith(prefix) for prefix in source_prefixes):
+            continue
+        display = cell_text(value)
+        if display:
+            rows.append({"Field": str(col), "Value": display})
+    if rows:
+        with st.expander("Additional source fields", expanded=False):
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def profile_search_terms(search: str) -> list[str]:
+    return [term for term in re.findall(r"[a-z0-9]+", cell_text(search).casefold()) if len(term) >= 2]
+
+
+def score_market_profile_rows(profile: pd.DataFrame, search: str) -> pd.Series:
+    query = compact_location_key(search)
+    if not query or profile.empty:
+        return pd.Series(0.0, index=profile.index)
+    terms = profile_search_terms(search)
+    searchable_cols = [
+        col
+        for col in [
+            "Lane",
+            "Site",
+            "Location Name",
+            "Location ID",
+            "Current 3PL",
+            "Previous 3PL",
+            "SCBP",
+            "Slack Channel",
+            "City",
+            "State",
+            "Market",
+            "Full Address",
+            "Site Leader",
+            "Regional Manager",
+            "Site Type",
+            "Site Status",
+            "Network Role",
+            "Active GUSTO",
+            "Active Lane",
+            "Hypercare Status",
+            "Hypercare Action",
+        ]
+        if col in profile.columns
+    ]
+    if not searchable_cols:
+        return pd.Series(0.0, index=profile.index)
+
+    haystack = profile[searchable_cols].fillna("").astype(str).agg(" | ".join, axis=1)
+    compact_haystack = haystack.map(compact_location_key)
+    scores = pd.Series(0.0, index=profile.index)
+    scores += compact_haystack.str.contains(query, regex=False, na=False).astype(float) * 80
+
+    for term in terms:
+        scores += compact_haystack.str.contains(term, regex=False, na=False).astype(float) * 10
+        exact_col_match = pd.Series(False, index=profile.index)
+        for col in searchable_cols:
+            exact_col_match = exact_col_match | profile[col].astype(str).map(compact_location_key).eq(term)
+        scores += exact_col_match.astype(float) * 25
+
+    numeric_terms = [term for term in terms if term.isdigit()]
+    for term in numeric_terms:
+        for col in ["Location ID", "Site", "Location Name", "Full Address"]:
+            if col in profile.columns:
+                scores += profile[col].astype(str).str.contains(term, regex=False, na=False).astype(float) * 24
+
+    # Lightweight fuzzy pass for typos and partial location names.
+    for index, text in compact_haystack.items():
+        if scores.at[index] > 0:
+            continue
+        tokens = set(text.split())
+        best = max((SequenceMatcher(None, query, token).ratio() for token in tokens), default=0)
+        if best >= 0.82:
+            scores.at[index] = best * 18
+    return scores
+
+
+def append_site_information_profiles(profile: pd.DataFrame, site_info: pd.DataFrame) -> pd.DataFrame:
+    if site_info.empty:
+        return profile
+    base = profile.copy()
+    if "_site_id_key" not in base.columns:
+        base["_site_id_key"] = base.get("Location ID", pd.Series("", index=base.index)).map(compact_site_id)
+    if "_location_key" not in base.columns:
+        base["_location_key"] = base.get("Location Name", pd.Series("", index=base.index)).map(compact_location_key)
+
+    existing_site_keys = set(base["_site_id_key"].astype(str).str.strip())
+    existing_location_keys = set(base["_location_key"].astype(str).str.strip())
+    additions = []
+    for _, source in site_info.iterrows():
+        site_key = cell_text(source.get("_site_id_key"))
+        location_key = cell_text(source.get("_location_key"))
+        if (site_key and site_key in existing_site_keys) or (location_key and location_key in existing_location_keys):
+            continue
+        location = first_nonblank(source, ["Site Info Location Name", "Active Location", "Hypercare Location"])
+        location_id = first_nonblank(source, ["Site Info Location ID", "Active Site ID", "Hypercare Site ID"])
+        lane = first_nonblank(source, ["Site Info Lane", "Active Lane"])
+        if not any([location, location_id, lane, cell_text(source.get("Full Address"))]):
+            continue
+        row = source.to_dict()
+        row.update(
+            {
+                "Lane": lane,
+                "Location Name": location or cell_text(source.get("Full Address")) or f"Site {location_id}",
+                "Location ID": location_id,
+                "Site": format_mfc_site_label(location) or (f"Site {location_id}" if location_id else lane),
+                "Delivery Day": "",
+                "Delivery Window": "",
+                "Avg Pallets": 0,
+                "Avg Weight": 0,
+                "Profile Source": "Site Information",
+                "_site_id_key": site_key,
+                "_location_key": location_key,
+            }
+        )
+        additions.append(row)
+    if not additions:
+        return base
+    added = pd.DataFrame(additions)
+    all_columns = list(dict.fromkeys([*base.columns, *added.columns]))
+    return pd.concat([base.reindex(columns=all_columns), added.reindex(columns=all_columns)], ignore_index=True)
+
+
 def render_embed_catalog() -> None:
     rows = [
         {"Embed Target": key, "Google Sites Placement": label, "URL Parameter": f"?site_embed={key}&embed=true"}
@@ -6690,8 +6854,14 @@ def build_site_information_context() -> tuple[pd.DataFrame, str]:
         "Regional Manager": first_matching_column(site_info, [["regional", "manager"]]),
         "Full Address": first_matching_column(site_info, [["full", "address"]]),
         "SCBP": first_matching_column(site_info, [["scbp"]]),
+        "Site Type": first_matching_column(site_info, [["site", "type"], ["location", "type"], ["type"]]),
+        "Site Status": first_matching_column(site_info, [["status"], ["site", "status"]]),
+        "Network Role": first_matching_column(site_info, [["network", "role"], ["role"]]),
+        "City": first_matching_column(site_info, [["city"]]),
+        "State": first_matching_column(site_info, [["state"]]),
+        "Postal Code": first_matching_column(site_info, [["postal"], ["zip"]]),
     }
-    keep_cols = [col for col in keep_map.values() if col]
+    keep_cols = list(dict.fromkeys(col for col in keep_map.values() if col))
     if not keep_cols:
         return pd.DataFrame(), sheet_name
     result = site_info[keep_cols].copy()
@@ -6727,7 +6897,7 @@ def build_allocation_operating_context() -> tuple[pd.DataFrame, str]:
         "Active Weight": weight_col,
         "Active Ship Date": date_col,
     }
-    keep_cols = [col for col in keep_map.values() if col]
+    keep_cols = list(dict.fromkeys(col for col in keep_map.values() if col))
     if not keep_cols:
         return pd.DataFrame(), sheet_name
     result = allocations[keep_cols].copy()
@@ -6754,8 +6924,23 @@ def build_sop_hypercare_context() -> tuple[pd.DataFrame, str]:
         "Hypercare Site ID": site_id_col,
         "Hypercare Status": status_col,
         "Hypercare Action": action_col,
+        "Hypercare SCBP": first_matching_column(hypercare, [["scbp"]]),
+        "Hypercare Site Leader": first_matching_column(hypercare, [["site", "leader"], ["leader"]]),
+        "Hypercare Regional Manager": first_matching_column(hypercare, [["regional", "manager"]]),
+        "Hypercare Owner": first_matching_column(hypercare, [["owner"]]),
+        "Hypercare Priority": first_matching_column(hypercare, [["priority"]]),
     }
-    keep_cols = [col for col in keep_map.values() if col]
+    metric_tokens = ["metric", "score", "rate", "orders", "units", "pallet", "volume", "late", "miss", "risk", "nyp", "fill", "dt", "sla"]
+    for col in hypercare.columns:
+        if col in keep_map.values():
+            continue
+        col_text = str(col).casefold()
+        numeric_ratio = pd.to_numeric(hypercare[col], errors="coerce").notna().mean()
+        if numeric_ratio >= 0.35 or any(token in col_text for token in metric_tokens):
+            keep_map[f"S&OP {col}"] = col
+        if len([key for key in keep_map if key.startswith("S&OP ")]) >= 10:
+            break
+    keep_cols = list(dict.fromkeys(col for col in keep_map.values() if col))
     if not keep_cols:
         return pd.DataFrame(), sheet_name
     result = hypercare[keep_cols].copy()
@@ -7036,58 +7221,77 @@ def render_market_profile_detail(
         if mfc_rows.empty:
             mfc_rows = profile[profile["Location Name"].astype(str).str.casefold().str.contains(selected_key.casefold(), regex=False, na=False)].copy()
         if mfc_rows.empty:
-            st.warning("That MFC profile was not found in the Training Cheat Sheet cache.")
+            scores = score_market_profile_rows(profile, selected_key)
+            mfc_rows = profile[scores > 0].assign(_search_score=scores[scores > 0]).sort_values("_search_score", ascending=False).head(1)
+        if mfc_rows.empty:
+            st.warning("That MFC profile was not found in the connected profile sources.")
             st.markdown(f'<a class="gp-profile-back-link" href="{back_href}" target="_self">Back to Market Profiles</a>', unsafe_allow_html=True)
             return
         row = mfc_rows.iloc[0]
-        lane = cell_text(row.get("Lane"))
+        lane = first_nonblank(row, ["Lane", "Active Lane", "Site Info Lane"])
+        location_name = first_nonblank(row, ["Location Name", "Site Info Location Name", "Active Location", "Hypercare Location"], "MFC profile")
+        site_label = first_nonblank(row, ["Site", "Location ID", "Site Info Location ID"])
+        active_gusto = first_nonblank(row, ["Active GUSTO"], "No active GUSTO")
+        active_status = first_nonblank(row, ["Active Status", "Hypercare Status", "Site Status"], "Reference profile")
+        address = first_nonblank(row, ["Full Address", "Street Address"])
         st.markdown(
-            f'<div class="gp-profile-hero"><div><span>MFC Profile</span><strong>{html.escape(cell_text(row.get("Location Name")))}</strong>'
-            f'<small>{html.escape(cell_text(row.get("Site")))} | Lane {html.escape(lane)}</small></div>'
+            f'<div class="gp-profile-hero"><div><span>MFC Profile</span><strong>{html.escape(location_name)}</strong>'
+            f'<small>{html.escape(site_label or "Site")} | Lane {html.escape(lane or "Unmapped")}</small></div>'
             f'<a href="{back_href}" target="_self">Back to Search</a></div>',
             unsafe_allow_html=True,
         )
-        render_field_table(
-            "Site Summary",
-            {
-                "Site": row.get("Site"),
-                "Location Name": row.get("Location Name"),
-                "Location ID": row.get("Location ID"),
-                "Lane": lane,
-                "Active GUSTO": row.get("Active GUSTO"),
-                "Active Status": row.get("Active Status"),
-                "Active Pallets": row.get("Active Pallets"),
-                "Active Weight": row.get("Active Weight"),
-                "Active Ship Date": row.get("Active Ship Date"),
-                "Delivery Day": row.get("Delivery Day"),
-                "Delivery Window": row.get("Delivery Window"),
-                "Average Pallets": row.get("Avg Pallets"),
-                "Average Weight": row.get("Avg Weight"),
-                "Full Address": row.get("Full Address"),
-                "Hours of Operation": row.get("Hours of Operation"),
-                "Site Leader": row.get("Site Leader"),
-                "Regional Manager": row.get("Regional Manager"),
-                "Region": row.get("Region"),
-                "Market": row.get("Market"),
-                "Current 3PL": row.get("Current 3PL"),
-                "Previous 3PL": row.get("Previous 3PL"),
-                "SCBP": row.get("SCBP"),
-                "Slack Channel": row.get("Slack Channel"),
-                "Hypercare Status": row.get("Hypercare Status"),
-                "Hypercare Action": row.get("Hypercare Action"),
-            },
+        render_enterprise_kpi_grid(
+            [
+                {"label": "Lane", "value": lane or "Unmapped", "delta": "Shipping region", "accent": "neutral"},
+                {"label": "Active GUSTO", "value": active_gusto, "delta": active_status, "accent": "green" if active_gusto != "No active GUSTO" else "neutral"},
+                {"label": "Avg Pallets", "value": format_number(row.get("Avg Pallets")), "delta": "Training profile", "accent": "yellow"},
+                {"label": "Hypercare", "value": first_nonblank(row, ["Hypercare Status"], "Not flagged"), "delta": first_nonblank(row, ["Hypercare Priority", "Hypercare Owner"], "S&OP context"), "accent": "red" if cell_text(row.get("Hypercare Status")) else "green"},
+            ],
+            columns=4,
         )
-        active_order = {
-            "GUSTO / Order": row.get("Active GUSTO"),
-            "Allocation Status": row.get("Active Status"),
-            "Pallets": row.get("Active Pallets"),
-            "Weight": row.get("Active Weight"),
-            "Planned Ship Date": row.get("Active Ship Date"),
-            "Hypercare Status": row.get("Hypercare Status"),
-            "Hypercare Action": row.get("Hypercare Action"),
-        }
-        if any(cell_text(value) for value in active_order.values()):
-            render_field_table("Current Operating Object", active_order)
+        render_profile_panel_grid(
+            [
+                {
+                    "title": "Operating Now",
+                    "items": {
+                        "GUSTO / Order": row.get("Active GUSTO"),
+                        "Allocation Status": row.get("Active Status"),
+                        "Pallets": row.get("Active Pallets"),
+                        "Weight": row.get("Active Weight"),
+                        "Planned Ship Date": row.get("Active Ship Date"),
+                        "Current Lane": first_nonblank(row, ["Active Lane", "Lane"]),
+                    },
+                },
+                {
+                    "title": "People",
+                    "items": {
+                        "Site Leader": first_nonblank(row, ["Site Leader", "Hypercare Site Leader"]),
+                        "Regional Manager": first_nonblank(row, ["Regional Manager", "Hypercare Regional Manager"]),
+                        "SCBP": first_nonblank(row, ["SCBP", "Hypercare SCBP"]),
+                        "Slack Channel": row.get("Slack Channel"),
+                    },
+                },
+                {
+                    "title": "Location",
+                    "items": {
+                        "Address": address,
+                        "City / State": ", ".join(part for part in [cell_text(row.get("City")), cell_text(row.get("State"))] if part),
+                        "Hours": row.get("Hours of Operation"),
+                        "Site Type": row.get("Site Type"),
+                        "Network Role": row.get("Network Role"),
+                    },
+                },
+                {
+                    "title": "S&OP Signal",
+                    "items": {
+                        "Status": row.get("Hypercare Status"),
+                        "Action": row.get("Hypercare Action"),
+                        "Owner": row.get("Hypercare Owner"),
+                        "Priority": row.get("Hypercare Priority"),
+                    },
+                },
+            ]
+        )
         render_mfc_network_map(profile, mfc_rows.head(1), "MFC Node Focus")
         sdt_windows = load_sdt_windows_for_lane(lane)
         if not sdt_windows.empty:
@@ -7098,6 +7302,7 @@ def render_market_profile_detail(
             cols = ["Site", "Location Name", "Delivery Day", "Delivery Window", "Full Address"]
             st.markdown('<div class="gp-section-label">Other MFCs In This Lane</div>', unsafe_allow_html=True)
             st.dataframe(lane_rows[[col for col in cols if col in lane_rows.columns]].drop_duplicates().head(100), use_container_width=True, hide_index=True)
+        render_profile_source_fields(row, ["S&OP ", "Hypercare", "Site Info", "Active "])
 
 
 def render_market_profiles() -> None:
@@ -7134,6 +7339,7 @@ def render_market_profiles() -> None:
     profile["Delivery Window"] = profile[delivery_window_col].astype(str).str.strip() if delivery_window_col else ""
     profile["Avg Pallets"] = pd.to_numeric(profile[pallet_col], errors="coerce") if pallet_col else 0
     profile["Avg Weight"] = pd.to_numeric(profile[weight_col], errors="coerce") if weight_col else 0
+    profile["Profile Source"] = "Training Cheat Sheet"
 
     if not market_breakdown.empty:
         market_lane_col = first_matching_column(market_breakdown, [["fm"], ["lane"]])
@@ -7226,6 +7432,8 @@ def render_market_profiles() -> None:
             profile = profile.merge(address[keep].rename(columns=rename).drop_duplicates("_location_key"), on="_location_key", how="left")
             profile = profile.drop(columns=["_location_key"], errors="ignore")
 
+    site_information_profiles, _ = build_site_information_context()
+    profile = append_site_information_profiles(profile, site_information_profiles)
     profile, operating_sources = enrich_market_profile_operating_context(profile)
     if operating_sources:
         source_text = " | ".join(f"{name}: {sheet}" for name, sheet in operating_sources.items() if sheet)
@@ -7243,18 +7451,20 @@ def render_market_profiles() -> None:
         search = search_cols[0].text_input(
             "Search market, site, location, or carrier owner",
             value=get_query_param("profile_search"),
-            placeholder="Example: MCO, MCO 117, Orlando, WARP, Misfits",
+            placeholder="Example: DC1, 1515, MCO 117, Orlando, WARP, Misfits",
         )
         search_cols[1].markdown("<div style='height: 1.78rem'></div>", unsafe_allow_html=True)
         search_cols[1].form_submit_button("Search", use_container_width=True)
     filtered = profile.copy()
     if search.strip():
-        needle = search.strip().casefold()
-        searchable_cols = [col for col in ["Lane", "Site", "Location Name", "Location ID", "Current 3PL", "Previous 3PL", "SCBP", "Slack Channel", "City", "State", "Market"] if col in filtered.columns]
-        mask = pd.Series(False, index=filtered.index)
-        for col in searchable_cols:
-            mask = mask | filtered[col].astype(str).str.casefold().str.contains(needle, regex=False, na=False)
-        filtered = filtered[mask]
+        scores = score_market_profile_rows(profile, search)
+        filtered = profile[scores > 0].assign(Search_Relevance=scores[scores > 0])
+        sort_cols = ["Search_Relevance"]
+        if "Active GUSTO" in filtered.columns:
+            sort_cols.append("Active GUSTO")
+        filtered = filtered.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+        if filtered.empty:
+            st.info("No direct profile matches found. Try a site number, address fragment, lane code, city, carrier, or leader name.")
 
     metric_cols = st.columns(4)
     metric_cols[0].metric("Matched MFCs", format_number(len(filtered)))
@@ -7288,8 +7498,12 @@ def render_market_profiles() -> None:
         "Full Address",
         "City",
         "State",
+        "Site Type",
+        "Site Status",
+        "Network Role",
         "SCBP",
         "Slack Channel",
+        "Profile Source",
     ]
     st.dataframe(
         filtered[[col for col in display_cols if col in filtered.columns]].head(250),
@@ -7403,7 +7617,7 @@ def render_google_sites_embed(embed_mode: str) -> None:
         render_executive_pallet_embed(context)
     elif embed_mode in {"executive_note", "leadership_brief"}:
         render_executive_note_embed(context, health, ops_data)
-    elif embed_mode in {"market_profiles", "mfc_network_map", "resource_library"}:
+    elif embed_mode in {"market_profiles", "mfc_lookup", "mfc_profiles", "mfc_network_map", "resource_library"}:
         render_market_profiles()
     else:
         render_embed_catalog()

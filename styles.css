@@ -884,6 +884,55 @@ h1 {
   text-shadow: none !important;
 }
 
+.gp-profile-panel-grid {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  margin: 0.85rem 0 1.05rem;
+}
+
+.gp-profile-panel {
+  background: #ffffff;
+  border: 1px solid #d7e0e8;
+  border-top: 4px solid var(--gp-blue-deep);
+  border-radius: 8px;
+  box-shadow: 0 10px 22px rgba(15, 35, 55, 0.08);
+  padding: 0.85rem 0.9rem;
+}
+
+.gp-profile-panel__title {
+  color: #132235 !important;
+  font-size: 0.8rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.45rem;
+  text-shadow: none !important;
+  text-transform: uppercase;
+}
+
+.gp-profile-panel__row {
+  border-top: 1px solid #e6edf3;
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: minmax(92px, 0.42fr) 1fr;
+  padding: 0.48rem 0;
+}
+
+.gp-profile-panel__row span {
+  color: #64748b !important;
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-shadow: none !important;
+}
+
+.gp-profile-panel__row strong {
+  color: #132235 !important;
+  font-size: 0.82rem;
+  font-weight: 850;
+  overflow-wrap: anywhere;
+  text-shadow: none !important;
+}
+
 .gp-empty-state {
   background: #ffffff;
   border: 1px solid #d7e0e8;
