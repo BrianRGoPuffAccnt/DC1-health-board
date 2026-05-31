@@ -193,6 +193,9 @@ EMBED_TARGETS = {
     "home_live_metrics": "Home Live Metrics",
     "live_metrics": "Home Live Metrics",
     "daily_health": "Daily Health Check",
+    "daily_ops_labor": "Daily Health Ops & Labor",
+    "daily_health_ops": "Daily Health Ops & Labor",
+    "operations_labor": "Daily Health Ops & Labor",
     "transportation_control": "Transportation Control",
     "transportation_allocations": "Transportation Control",
     "executive_brief": "Executive Brief",
@@ -2227,6 +2230,46 @@ def summarize_crossdock_pallet_completion(pallets: pd.DataFrame) -> tuple[pd.Dat
     return crossdock_summary, mfc_summary
 
 
+def summarize_fill_rate_dock_activity(fill_rate: pd.DataFrame) -> pd.DataFrame:
+    if fill_rate.empty:
+        return pd.DataFrame()
+
+    dock_col = first_matching_column(fill_rate, [["dock", "door"], ["door"]])
+    route_col = first_matching_column(fill_rate, [["route"], ["carrier"]])
+    to_col = first_matching_column(fill_rate, [["po", "number"], ["to", "number"], ["to"]])
+    location_col = first_matching_column(fill_rate, [["location", "name"], ["location"]])
+    units_nyp_col = first_matching_column(fill_rate, [["units", "nyp"]])
+    lbi_col = first_matching_column(fill_rate, [["lbi", "pick"], ["pick", "quantity"]])
+    pallets_col = first_matching_column(fill_rate, [["total", "pallets"], ["pallets"]])
+    weight_col = first_matching_column(fill_rate, [["total", "pallet", "weight"], ["weight"]])
+
+    if not dock_col:
+        return pd.DataFrame()
+
+    work = fill_rate.copy()
+    work["Dock Door"] = work[dock_col].fillna("Unassigned").astype(str).str.strip()
+    work.loc[work["Dock Door"].isin(["", "nan", "None"]), "Dock Door"] = "Unassigned"
+    work["Units NYP"] = pd.to_numeric(work[units_nyp_col], errors="coerce").fillna(0) if units_nyp_col else 0
+    work["Picked Units"] = pd.to_numeric(work[lbi_col], errors="coerce").fillna(0) if lbi_col else 0
+    work["Pallets"] = pd.to_numeric(work[pallets_col], errors="coerce").fillna(0) if pallets_col else 0
+    work["Weight"] = pd.to_numeric(work[weight_col], errors="coerce").fillna(0) if weight_col else 0
+
+    return (
+        work.groupby("Dock Door", dropna=False)
+        .agg(
+            Routes=(route_col if route_col else dock_col, "nunique"),
+            Gustos=(to_col if to_col else dock_col, "nunique"),
+            MFCs=(location_col if location_col else dock_col, "nunique"),
+            Picked_Units=("Picked Units", "sum"),
+            Units_NYP=("Units NYP", "sum"),
+            Pallets=("Pallets", "sum"),
+            Weight=("Weight", "sum"),
+        )
+        .reset_index()
+        .sort_values(["Units_NYP", "Pallets", "Gustos"], ascending=[False, False, False])
+    )
+
+
 def load_daily_health_context() -> DailyHealthContext:
     sdt_google = latest_google_sheet_by_type("SDT Schedule")
     sdt_sheets = list_google_sheet_names(sdt_google)
@@ -2511,6 +2554,181 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
         f"{risk_routes:,} route(s) require follow-up."
     )
     st.text_area("Copy-ready Daily Health note", value=brief, height=90)
+
+
+def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
+    values, pallet_source = load_daily_pallet_count_values()
+    pallets, pallet_date = parse_daily_pallet_counts(values)
+    crossdock_summary, mfc_summary = summarize_crossdock_pallet_completion(pallets)
+    dock_summary = summarize_fill_rate_dock_activity(context.fill_rate)
+    readiness = build_fill_rate_readiness(context.fill_rate)
+
+    if pallets.empty and context.fill_rate.empty:
+        render_enterprise_module_header(
+            "Daily Health Operations",
+            "Ops & Labor Pulse",
+            "Connect the Operations Fill-Rate Google Sheet to populate pallet readiness, dock pressure, and workload focus.",
+            "Yellow",
+            "No fill-rate data loaded",
+        )
+        st.info("The embedded operations panel is waiting for the Operations Fill-Rate source.")
+        return
+
+    total_pallets = int(pallets["Pallet"].count()) if not pallets.empty else int(readiness.get("Fill_Total_Pallets", pd.Series(dtype=float)).sum())
+    completed_pallets = int(pallets["Complete"].sum()) if not pallets.empty else 0
+    open_pallets = max(total_pallets - completed_pallets, 0)
+    completion_rate = completed_pallets / total_pallets if total_pallets else 0
+    active_gustos = int(pallets["Gusto"].nunique()) if not pallets.empty else int(readiness.get("Fill_POs", pd.Series(dtype=float)).sum())
+    active_mfcs = int(pallets["Location Name"].nunique()) if not pallets.empty else int(readiness.get("Fill_Locations", pd.Series(dtype=float)).sum())
+    crossdock_count = int(pallets["Cross-Dock"].nunique()) if not pallets.empty else int(readiness["Fill Carrier"].nunique()) if not readiness.empty else 0
+    total_weight = float(pallets["Pallet Weight"].sum()) if not pallets.empty else float(readiness.get("Total_Pallet_Weight", pd.Series(dtype=float)).sum())
+    units_nyp = int(readiness.get("Units_NYP", pd.Series(dtype=float)).sum()) if not readiness.empty else 0
+    po_without_pallets = int(readiness.get("PO_WO_Pallets", pd.Series(dtype=float)).sum()) if not readiness.empty else 0
+    picked_units = int(readiness.get("LBI_Pick_Quantity", pd.Series(dtype=float)).sum()) if not readiness.empty else 0
+    total_work_units = picked_units + units_nyp
+    work_completion = picked_units / total_work_units if total_work_units else completion_rate
+
+    status = "Green"
+    if open_pallets or units_nyp or po_without_pallets:
+        status = "Yellow"
+    if completion_rate < 0.5 and (open_pallets or units_nyp):
+        status = "Red"
+
+    source_bits = []
+    if pallet_source:
+        source_bits.append(pallet_source)
+    if pallet_date is not None:
+        source_bits.append(f"Ship date {pallet_date.strftime('%m/%d/%Y')}")
+    elif context.fill_source:
+        source_bits.append(context.fill_source)
+
+    render_enterprise_module_header(
+        "Daily Health Operations",
+        "Ops & Labor Pulse",
+        "Operations Fill-Rate view for pallet readiness, dock pressure, and labor workload focus.",
+        status,
+        " | ".join(source_bits) if source_bits else "Operations Fill-Rate source",
+    )
+
+    render_enterprise_kpi_grid(
+        [
+            {
+                "label": "Pallet Completion",
+                "value": format_percent(completion_rate),
+                "delta": f"{format_number(completed_pallets)} of {format_number(total_pallets)} staged",
+                "accent": "green" if completion_rate >= 0.9 else "yellow" if completion_rate >= 0.5 else "red",
+            },
+            {
+                "label": "Open Pallets",
+                "value": format_number(open_pallets),
+                "delta": "remaining prep / staging work",
+                "accent": "green" if open_pallets == 0 else "yellow",
+            },
+            {
+                "label": "Active GUSTOs",
+                "value": format_number(active_gustos),
+                "delta": f"{format_number(active_mfcs)} MFC destination(s)",
+                "accent": "neutral",
+            },
+            {
+                "label": "Units NYP",
+                "value": format_number(units_nyp),
+                "delta": f"{format_percent(work_completion)} progress to completion",
+                "accent": "green" if units_nyp == 0 else "yellow",
+            },
+            {
+                "label": "Weight in Flow",
+                "value": format_number(total_weight),
+                "delta": f"{format_number(crossdock_count)} cross-dock lane(s)",
+                "accent": "neutral",
+            },
+            {
+                "label": "PO W/O Pallets",
+                "value": format_number(po_without_pallets),
+                "delta": "fill-rate exception queue",
+                "accent": "green" if po_without_pallets == 0 else "red",
+            },
+        ],
+        columns=6,
+    )
+
+    if not crossdock_summary.empty:
+        chart_cols = st.columns([1.1, 0.9])
+        with chart_cols[0]:
+            st.markdown("#### Cross-Dock Readiness")
+            chart = crossdock_summary.copy()
+            chart["Completion Label"] = chart["Completed"].astype(int).astype(str) + " / " + chart["Pallets"].astype(int).astype(str)
+            fig = px.bar(
+                chart.sort_values("Completion %", ascending=True),
+                x="Completion %",
+                y="Cross-Dock",
+                orientation="h",
+                color="Open Pallets",
+                text="Completion Label",
+                color_continuous_scale=["#2f7d55", "#efb13f", "#bd372f"],
+                labels={"Completion %": "Pallet Completion", "Cross-Dock": "", "Open Pallets": "Open"},
+            )
+            fig.update_xaxes(tickformat=".0%", range=[0, 1])
+            fig.update_traces(textposition="outside", cliponaxis=False)
+            fig.update_layout(height=max(330, 36 * len(chart)), margin=dict(l=10, r=80, t=10, b=10), coloraxis_showscale=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+        with chart_cols[1]:
+            st.markdown("#### Labor Focus by MFC")
+            focus = mfc_summary[mfc_summary["Open Pallets"].gt(0)].copy()
+            if focus.empty:
+                focus = mfc_summary.copy()
+            focus = focus.sort_values(["Open Pallets", "Weight"], ascending=[False, False]).head(10)
+            display = focus[["Cross-Dock", "Location Name", "Gusto", "Pallet Progress", "Open Pallets", "Weight", "Completion %"]].copy()
+            display["Weight"] = display["Weight"].map(format_number)
+            st.dataframe(
+                display,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Completion %": st.column_config.ProgressColumn("Completion", format="%.0f%%", min_value=0, max_value=1)
+                },
+            )
+
+    if not dock_summary.empty:
+        st.markdown("#### Dock Door Workload")
+        dock_cols = st.columns([0.95, 1.05])
+        with dock_cols[0]:
+            fig_dock = px.bar(
+                dock_summary.head(12).sort_values("Units_NYP", ascending=True),
+                x="Units_NYP",
+                y="Dock Door",
+                orientation="h",
+                color="Gustos",
+                color_continuous_scale=["#3a77a8", "#efb13f"],
+                labels={"Units_NYP": "Units NYP", "Dock Door": "", "Gustos": "GUSTOs"},
+            )
+            fig_dock.update_layout(height=320, margin=dict(l=10, r=30, t=10, b=10), coloraxis_showscale=False)
+            st.plotly_chart(fig_dock, use_container_width=True)
+        with dock_cols[1]:
+            dock_display = dock_summary.head(12).copy()
+            dock_display["Picked_Units"] = dock_display["Picked_Units"].map(format_number)
+            dock_display["Units_NYP"] = dock_display["Units_NYP"].map(format_number)
+            dock_display["Pallets"] = dock_display["Pallets"].map(format_number)
+            dock_display["Weight"] = dock_display["Weight"].map(format_number)
+            st.dataframe(dock_display, use_container_width=True, hide_index=True)
+
+    note_parts = [
+        f"Ops/Labor pulse: {status}.",
+        f"{format_number(completed_pallets)} of {format_number(total_pallets)} pallets complete ({format_percent(completion_rate)}).",
+        f"{format_number(open_pallets)} pallets remain open across {format_number(active_gustos)} GUSTO(s).",
+        f"Units NYP: {format_number(units_nyp)}; PO without pallets: {format_number(po_without_pallets)}.",
+    ]
+    if not mfc_summary.empty:
+        top = mfc_summary.sort_values(["Open Pallets", "Weight"], ascending=[False, False]).head(3)
+        watch = "; ".join(
+            f"{row['Location Name']} / {row['Gusto']} ({int(row['Open Pallets'])} open)"
+            for _, row in top.iterrows()
+            if int(row["Open Pallets"]) > 0
+        )
+        if watch:
+            note_parts.append(f"Watch: {watch}.")
+    st.text_area("Copy-ready operations note", value=" ".join(note_parts), height=95)
 
 
 def summarize_daily_health_progress(progress: pd.DataFrame) -> dict[str, int | float | str]:
@@ -7605,6 +7823,8 @@ def render_google_sites_embed(embed_mode: str) -> None:
         render_live_update(context)
     elif embed_mode == "daily_health":
         render_executive_briefs_view(context, health, ops_data)
+    elif embed_mode in {"daily_ops_labor", "daily_health_ops", "operations_labor"}:
+        render_daily_ops_labor_embed(context)
     elif embed_mode in {"transportation_control", "transportation_allocations"}:
         render_embed_transportation_control(context)
     elif embed_mode in {"executive_brief", "executive_briefs"}:
