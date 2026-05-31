@@ -519,6 +519,15 @@ def get_query_param(name: str) -> str:
     return str(value)
 
 
+def get_site_embed_mode() -> str:
+    # Streamlit reserves `embed` for its own chrome-hiding mode; use `site_embed` for module routing.
+    for name in ("site_embed", "embed_target", "module", "embed"):
+        value = get_query_param(name).strip().casefold()
+        if value and value not in {"true", "false", "1", "0"}:
+            return value
+    return ""
+
+
 def app_href(section: str, view: str, **params: object) -> str:
     query = {"section": section, "view": view, **params}
     return "?" + "&".join(
@@ -2634,8 +2643,8 @@ def render_open_tos_drilldown(context: DailyHealthContext) -> None:
     if not carrier:
         return
     detail = build_open_to_detail(context, carrier)
-    embed_mode = get_query_param("embed")
-    close_href = app_href("Home", "Live Update", embed=embed_mode) if embed_mode else app_href("Home", "Live Update")
+    embed_mode = get_site_embed_mode()
+    close_href = app_href("Home", "Live Update", site_embed=embed_mode) if embed_mode else app_href("Home", "Live Update")
     st.markdown(
         f"""
         <div class="gp-drilldown-panel">
@@ -2718,9 +2727,9 @@ def render_enterprise_risk_cards(risks: pd.DataFrame) -> None:
         window = str(row.get("Window Status", "Window review"))
         status_class = "red" if "Past" in timing or "Past" in window else "yellow"
         carrier = str(row.get("Carrier", "Unknown Carrier"))
-        embed_mode = get_query_param("embed")
+        embed_mode = get_site_embed_mode()
         open_tos_href = (
-            app_href("Home", "Live Update", open_tos=carrier, embed=embed_mode)
+            app_href("Home", "Live Update", open_tos=carrier, site_embed=embed_mode)
             if embed_mode
             else app_href("Home", "Live Update", open_tos=carrier)
         )
@@ -6408,14 +6417,14 @@ def render_market_profile_result_links(filtered: pd.DataFrame, search: str) -> N
     if filtered.empty:
         st.info("No market profile matches found.")
         return
-    embed_mode = get_query_param("embed")
+    embed_mode = get_site_embed_mode()
     lane_cards = []
     for _, row in filtered[["Lane"]].dropna().drop_duplicates().head(8).iterrows():
         lane = cell_text(row.get("Lane"))
         if not lane:
             continue
         lane_rows = filtered[filtered["Lane"].astype(str).eq(lane)]
-        href = app_href("Operations", "Market Profiles", profile_type="lane", profile_key=lane, profile_search=search, embed=embed_mode)
+        href = app_href("Operations", "Market Profiles", profile_type="lane", profile_key=lane, profile_search=search, site_embed=embed_mode)
         lane_cards.append(
             f'<a class="gp-profile-link-card" href="{href}" target="_self"><span>Lane</span><strong>{html.escape(lane)}</strong>'
             f'<small>{len(lane_rows):,} MFC(s) | {format_number(lane_rows.get("Avg Pallets", pd.Series(dtype=float)).sum())} avg pallets</small></a>'
@@ -6425,7 +6434,7 @@ def render_market_profile_result_links(filtered: pd.DataFrame, search: str) -> N
         location_name = cell_text(row.get("Location Name"))
         if not location_name:
             continue
-        href = app_href("Operations", "Market Profiles", profile_type="mfc", profile_key=location_name, profile_search=search, embed=embed_mode)
+        href = app_href("Operations", "Market Profiles", profile_type="mfc", profile_key=location_name, profile_search=search, site_embed=embed_mode)
         mfc_cards.append(
             f'<a class="gp-profile-link-card" href="{href}" target="_self"><span>MFC Profile</span><strong>{html.escape(cell_text(row.get("Site")) or location_name)}</strong>'
             f'<small>{html.escape(location_name)} | Lane {html.escape(cell_text(row.get("Lane")))}</small></a>'
@@ -6444,7 +6453,7 @@ def render_field_table(title: str, values: dict[str, object]) -> None:
 
 def render_embed_catalog() -> None:
     rows = [
-        {"Embed Target": key, "Google Sites Placement": label, "URL Parameter": f"?embed={key}"}
+        {"Embed Target": key, "Google Sites Placement": label, "URL Parameter": f"?site_embed={key}&embed=true"}
         for key, label in EMBED_TARGETS.items()
     ]
     st.subheader("Google Sites Embed Targets")
@@ -6649,13 +6658,13 @@ def enrich_market_profile_operating_context(profile: pd.DataFrame) -> tuple[pd.D
 def render_operating_profile_gallery(filtered: pd.DataFrame, search: str) -> None:
     if filtered.empty:
         return
-    embed_mode = get_query_param("embed")
+    embed_mode = get_site_embed_mode()
     cards = []
     for _, row in filtered.head(18).iterrows():
         location_name = cell_text(row.get("Location Name"))
         if not location_name:
             continue
-        href = app_href("Operations", "Market Profiles", profile_type="mfc", profile_key=location_name, profile_search=search, embed=embed_mode)
+        href = app_href("Operations", "Market Profiles", profile_type="mfc", profile_key=location_name, profile_search=search, site_embed=embed_mode)
         gusto = cell_text(row.get("Active GUSTO")) or "No active GUSTO"
         status = cell_text(row.get("Active Status")) or "Reference profile"
         lane = cell_text(row.get("Lane"))
@@ -6685,7 +6694,7 @@ def render_market_profile_detail(
         "Operations",
         "Market Profiles",
         profile_search=get_query_param("profile_search"),
-        embed=get_query_param("embed"),
+        site_embed=get_site_embed_mode(),
     )
     selected_type = selected_type.casefold()
     selected_key = cell_text(selected_key)
@@ -7527,7 +7536,7 @@ def main() -> None:
     init_db()
     st.set_page_config(page_title=APP_TITLE, page_icon=str(LOGO_PATH), layout="wide")
     inject_brand_styles()
-    embed_mode = get_query_param("embed").strip().casefold()
+    embed_mode = get_site_embed_mode()
     if embed_mode:
         render_google_sites_embed(embed_mode)
         return

@@ -95,7 +95,17 @@ https://YOUR-APP.streamlit.app/?section=Operations&view=Fill%20Rate%20/%20Pallet
 https://YOUR-APP.streamlit.app/?section=Operations&view=Market%20Profiles
 ```
 
-If the embedded app shows Streamlit chrome you do not want, try appending:
+For focused Google Sites modules, use `site_embed` to render only the selected app block:
+
+```text
+https://YOUR-APP.streamlit.app/?site_embed=home_live_metrics&embed=true
+https://YOUR-APP.streamlit.app/?site_embed=daily_health&embed=true
+https://YOUR-APP.streamlit.app/?site_embed=transportation_control&embed=true
+https://YOUR-APP.streamlit.app/?site_embed=executive_brief&embed=true
+https://YOUR-APP.streamlit.app/?site_embed=market_profiles&embed=true
+```
+
+If a full-page embedded app shows Streamlit chrome you do not want, try appending Streamlit's built-in display flag:
 
 ```text
 ?embed=true

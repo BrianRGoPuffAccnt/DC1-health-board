@@ -76,10 +76,11 @@ On first hosted run, those secret-defined sheet URLs are synced into the app cac
 For Google Sites, embed the deployed Streamlit URL. Use direct query URLs for specific page modules, for example:
 
 ```text
-https://YOUR-APP.streamlit.app/?section=Home&view=Live%20Update&embed=true
-https://YOUR-APP.streamlit.app/?section=Home&view=Executive%20Briefs&embed=true
-https://YOUR-APP.streamlit.app/?section=Operations&view=Fill%20Rate%20/%20Pallet%20Ops&embed=true
-https://YOUR-APP.streamlit.app/?section=Operations&view=Market%20Profiles&embed=true
+https://YOUR-APP.streamlit.app/?site_embed=home_live_metrics&embed=true
+https://YOUR-APP.streamlit.app/?site_embed=daily_health&embed=true
+https://YOUR-APP.streamlit.app/?site_embed=transportation_control&embed=true
+https://YOUR-APP.streamlit.app/?site_embed=executive_brief&embed=true
+https://YOUR-APP.streamlit.app/?site_embed=market_profiles&embed=true
 ```
 
 See `STREAMLIT_DEPLOYMENT.md` for the full deployment checklist.
