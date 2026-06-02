@@ -152,6 +152,8 @@ REFERENCE_SHEET_TAGS = [
     "Tender Template",
     "Transportation Schedule",
     "Carrier Mapping",
+    "Site Information",
+    "S&OP",
     "Rates",
     "Schedules",
     "Allocation History",
@@ -210,6 +212,11 @@ EMBED_TARGETS = {
     "mfc_lookup": "MFC Lookup",
     "mfc_profiles": "MFC Profiles",
     "mfc_network_map": "MFC Network Map",
+    "signal_notifications": "Signal Notifications",
+    "signal_center": "Signal Notifications",
+    "decision_support_chat": "Decision Support Chat",
+    "decision_chat": "Decision Support Chat",
+    "claude_chat": "Decision Support Chat",
     "resource_library": "Resource Library Profiles",
 }
 COMMAND_CENTER_DEFAULTS = {
@@ -339,6 +346,7 @@ class DailyHealthContext:
     ob_source: str
     fill_source: str
     ob_sheet: str
+    ob_sheets: list[str]
     ob_reason: str
     ob_target_day: pd.Timestamp
     matched_columns: dict[str, str]
@@ -1915,6 +1923,65 @@ def select_ob_tracker_sheet(sheet_names: list[str], day: datetime | pd.Timestamp
     return "", target_day, "no usable tab found"
 
 
+def select_ob_tracker_sheets(sheet_names: list[str], n: int = 3) -> list[tuple[pd.Timestamp, str]]:
+    """Return up to n most recent dated OB Tracker tabs, sorted oldest-first for concat ordering."""
+    clean_names = [sheet for sheet in sheet_names if str(sheet).strip()]
+    today = pd.Timestamp.now().normalize()
+    dated: list[tuple[pd.Timestamp, str]] = []
+    for sheet in clean_names:
+        if "mix label" in str(sheet).casefold():
+            continue
+        parsed = parse_date_sheet_name(str(sheet))
+        if parsed is None:
+            continue
+        month, day_num = parsed
+        candidate = pd.Timestamp(year=today.year, month=month, day=day_num)
+        if candidate <= today:
+            dated.append((candidate, sheet))
+    if not dated:
+        usable = [s for s in clean_names if "mix label" not in str(s).casefold()]
+        return [(today, s) for s in usable[-n:]]
+    dated.sort(key=lambda x: x[0])
+    return dated[-n:]
+
+
+def load_multi_tab_ob_tracker(
+    ob_google: pd.Series | None,
+    n: int = 3,
+) -> tuple[pd.DataFrame, list[str], pd.Timestamp, str]:
+    """Load up to n recent OB Tracker tabs, dedup by GUSTO/TO keeping the latest status."""
+    if ob_google is None:
+        return pd.DataFrame(), [], previous_working_day(), "no connection"
+    sheet_names = list_google_sheet_names(ob_google)
+    tabs = select_ob_tracker_sheets(sheet_names, n)
+    if not tabs:
+        return pd.DataFrame(), [], previous_working_day(), "no dated tabs found"
+    frames: list[pd.DataFrame] = []
+    for tab_date, tab_name in tabs:
+        df = read_google_sheet_named_table(ob_google, tab_name)
+        if df.empty:
+            continue
+        df = df.copy()
+        df["_ob_tab"] = tab_name
+        df["_ob_tab_date"] = tab_date
+        frames.append(df)
+    if not frames:
+        tab_names = [t for _, t in tabs]
+        return pd.DataFrame(), tab_names, tabs[-1][0], f"all tabs empty ({', '.join(tab_names)})"
+    combined = pd.concat(frames, ignore_index=True)
+    to_col = first_matching_column(combined, [["to"], ["po", "number"]])
+    if to_col:
+        to_vals = combined[to_col].astype(str).str.strip()
+        has_id = to_vals.str.len().gt(0) & ~to_vals.str.casefold().isin({"nan", "none", ""})
+        identified = combined[has_id].drop_duplicates(subset=[to_col], keep="last")
+        unidentified = combined[~has_id]
+        combined = pd.concat([identified, unidentified], ignore_index=True)
+    loaded_tabs = [t for _, t in tabs]
+    newest_date = tabs[-1][0]
+    reason = f"{len(frames)} tab(s) combined: {', '.join(loaded_tabs)}"
+    return combined, loaded_tabs, newest_date, reason
+
+
 def normalize_route_key(value: object) -> str:
     text = str(value or "").casefold()
     text = re.sub(r"[^a-z0-9]+", " ", text)
@@ -2286,15 +2353,13 @@ def load_daily_health_context() -> DailyHealthContext:
     fill_source = str(fill_google["name"]) if fill_google is not None else ""
 
     ob_source = ""
-    ob_sheet = ""
+    ob_sheets: list[str] = []
     ob_reason = ""
     ob_target_day = previous_working_day()
     ob_tracker = pd.DataFrame()
     ob_google = latest_google_sheet_by_type("OB TO Tracker")
-    ob_sheet_names = list_google_sheet_names(ob_google)
-    ob_sheet, ob_target_day, ob_reason = select_ob_tracker_sheet(ob_sheet_names)
-    if ob_sheet:
-        ob_tracker = read_google_sheet_named_table(ob_google, ob_sheet)
+    ob_tracker, ob_sheets, ob_target_day, ob_reason = load_multi_tab_ob_tracker(ob_google, n=3)
+    if not ob_tracker.empty:
         ob_source = str(ob_google["name"]) if ob_google is not None else ""
 
     progress = pd.DataFrame()
@@ -2303,7 +2368,9 @@ def load_daily_health_context() -> DailyHealthContext:
         progress, matched_columns = build_schedule_progress(sdt, ob_tracker)
         if not progress.empty:
             progress = merge_fill_rate_readiness(progress, fill_rate)
+            progress = enrich_progress_with_allocation(progress)
 
+    ob_sheet = ob_sheets[-1] if ob_sheets else ""
     return DailyHealthContext(
         progress=progress,
         sdt=sdt,
@@ -2313,6 +2380,7 @@ def load_daily_health_context() -> DailyHealthContext:
         ob_source=ob_source,
         fill_source=fill_source,
         ob_sheet=ob_sheet,
+        ob_sheets=ob_sheets,
         ob_reason=ob_reason,
         ob_target_day=ob_target_day,
         matched_columns=matched_columns,
@@ -2422,7 +2490,66 @@ def build_schedule_progress(sdt: pd.DataFrame, tracker: pd.DataFrame) -> tuple[p
     return result, required
 
 
-def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Timestamp, ob_sheet: str, ob_source: str) -> None:
+def build_allocation_baseline() -> pd.DataFrame:
+    """Load Allocation History Google Sheet; return one row per carrier with total allocated GUSTOs."""
+    connection, allocations, _ = read_google_sheet_best_table(
+        "Allocation History",
+        ["allocation", "dc1", "daily"],
+    )
+    if allocations.empty:
+        return pd.DataFrame()
+    gusto_col = first_matching_column(allocations, [["gusto"], ["po", "number"], ["to", "number"], ["order"]])
+    lane_col = first_matching_column(allocations, [["lane"], ["route"], ["carrier"]])
+    date_col = first_matching_column(allocations, [["ship", "date"], ["planned", "ship"], ["date"]])
+    pallet_col = first_matching_column(allocations, [["pallet", "count"], ["pallets"], ["pallet"]])
+    if not gusto_col or not lane_col:
+        return pd.DataFrame()
+    work = allocations.copy()
+    work["_route_key"] = work[lane_col].map(normalize_route_key)
+    work["_gusto"] = work[gusto_col].astype(str).str.strip()
+    work = work[work["_gusto"].str.len().gt(0) & ~work["_gusto"].str.casefold().isin({"nan", "none", ""})]
+    if date_col:
+        work["_ship_date"] = pd.to_datetime(work[date_col], errors="coerce")
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=7)
+        recent = work[work["_ship_date"].isna() | work["_ship_date"].ge(cutoff)]
+        if not recent.empty:
+            work = recent
+    agg_kwargs: dict = {"Allocated": ("_gusto", "nunique")}
+    if pallet_col:
+        agg_kwargs["Alloc_Pallets"] = (pallet_col, "sum")
+    agg = (
+        work.groupby(["_route_key", lane_col], dropna=False)
+        .agg(**agg_kwargs)
+        .reset_index()
+        .rename(columns={lane_col: "Alloc_Carrier"})
+    )
+    if "Alloc_Pallets" not in agg.columns:
+        agg["Alloc_Pallets"] = 0
+    agg["Alloc_Pallets"] = pd.to_numeric(agg["Alloc_Pallets"], errors="coerce").fillna(0).astype(int)
+    return agg
+
+
+def enrich_progress_with_allocation(progress: pd.DataFrame) -> pd.DataFrame:
+    """Merge allocation baseline into carrier progress — adds Allocated, Alloc_Pallets, Gap columns."""
+    baseline = build_allocation_baseline()
+    if baseline.empty or progress.empty:
+        return progress
+    merged = progress.copy()
+    if "_route_key" not in merged.columns:
+        merged["_route_key"] = merged["Carrier"].map(normalize_route_key)
+    merged = merged.merge(
+        baseline[["_route_key", "Allocated", "Alloc_Pallets"]],
+        on="_route_key",
+        how="left",
+    ).drop(columns=["_route_key"], errors="ignore")
+    merged["Allocated"] = pd.to_numeric(merged.get("Allocated"), errors="coerce").fillna(0).astype(int)
+    merged["Alloc_Pallets"] = pd.to_numeric(merged.get("Alloc_Pallets"), errors="coerce").fillna(0).astype(int)
+    if "TOs" in merged.columns:
+        merged["Gap"] = (merged["Allocated"] - merged["TOs"]).clip(lower=0).astype(int)
+    return merged
+
+
+def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Timestamp, ob_sheet: str, ob_source: str, ob_reason: str = "") -> None:
     if progress.empty:
         return
 
@@ -2443,19 +2570,33 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
         status = "Red"
 
     st.markdown("### Daily Health Visual")
+    tab_label = ob_sheet or "Not found"
     st.caption(
-        f"Live engine view built from SDT Schedule + OB TO Tracker. OB tab: {ob_sheet or 'Not found'} | "
+        f"Live engine view built from SDT Schedule + OB TO Tracker ({ob_reason or tab_label}). "
         f"Target day: {ob_target_day.strftime('%m/%d/%Y')}"
         + (f" | Source: {ob_source}" if ob_source else "")
     )
 
-    metric_cols = st.columns(6)
-    metric_cols[0].metric("Window Health", status)
-    metric_cols[1].metric("Routes", format_number(total_routes))
-    metric_cols[2].metric("TO Progress", f"{loaded:,} / {total_tos:,}", format_percent(progress_rate))
-    metric_cols[3].metric("Open TOs", format_number(open_tos))
-    metric_cols[4].metric("Lines Remaining", format_number(work_remaining))
-    metric_cols[5].metric("Units NYP", format_number(units_nyp))
+    total_allocated = int(progress["Allocated"].sum()) if "Allocated" in progress.columns else 0
+    total_gap = int(progress["Gap"].sum()) if "Gap" in progress.columns else 0
+
+    if total_allocated:
+        metric_cols = st.columns(7)
+        metric_cols[0].metric("Window Health", status)
+        metric_cols[1].metric("Allocated", format_number(total_allocated))
+        metric_cols[2].metric("TO Progress", f"{loaded:,} / {total_tos:,}", format_percent(progress_rate))
+        metric_cols[3].metric("Open TOs", format_number(open_tos))
+        metric_cols[4].metric("Not in OB Yet", format_number(total_gap))
+        metric_cols[5].metric("Lines Remaining", format_number(work_remaining))
+        metric_cols[6].metric("Units NYP", format_number(units_nyp))
+    else:
+        metric_cols = st.columns(6)
+        metric_cols[0].metric("Window Health", status)
+        metric_cols[1].metric("Routes", format_number(total_routes))
+        metric_cols[2].metric("TO Progress", f"{loaded:,} / {total_tos:,}", format_percent(progress_rate))
+        metric_cols[3].metric("Open TOs", format_number(open_tos))
+        metric_cols[4].metric("Lines Remaining", format_number(work_remaining))
+        metric_cols[5].metric("Units NYP", format_number(units_nyp))
 
     chart_df = progress.copy()
     chart_df["Progress Display"] = chart_df["Progress %"].fillna(0) if "Progress %" in chart_df.columns else 0
@@ -2530,6 +2671,22 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
         st.subheader("Pallet Readiness")
         st.plotly_chart(fig_readiness, use_container_width=True)
 
+    if "Allocated" in progress.columns and total_allocated:
+        st.subheader("Allocation vs OB Tracker")
+        alloc_cols = [
+            "Carrier",
+            "Allocated",
+            "TOs",
+            "Loaded",
+            "Open TOs",
+            "Gap",
+            "Alloc_Pallets",
+            "Timing Risk",
+        ]
+        alloc_display = progress[[col for col in alloc_cols if col in progress.columns]].copy()
+        st.caption("Allocated = GUSTOs in the Allocation History sheet. TOs = tracked in OB Tracker. Gap = allocated but not yet in OB Tracker.")
+        st.dataframe(alloc_display, use_container_width=True, hide_index=True)
+
     watchlist = progress[progress["Timing Risk"].ne("Normal")].copy() if "Timing Risk" in progress.columns else pd.DataFrame()
     if watchlist.empty:
         st.success("All matched routes are currently normal against the SDT window view.")
@@ -2540,7 +2697,10 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
             "Window Status",
             "Load Ready Time",
             "Departure Time",
+            "Allocated",
+            "TOs",
             "Open TOs",
+            "Gap",
             "Lines_Remaining",
             "Units_NYP",
             "PO_WO_Pallets",
@@ -2553,9 +2713,75 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
         f"DC1 SDT x OB Tracker health for {ob_target_day.strftime('%m/%d')}: {status}. "
         f"{loaded:,} of {total_tos:,} TOs loaded across {total_routes:,} route(s); "
         f"{open_tos:,} TOs remain open with {work_remaining:,} lines remaining and {units_nyp:,} units NYP. "
-        f"{risk_routes:,} route(s) require follow-up."
+        + (f"{total_gap:,} GUSTO(s) allocated but not yet in the OB Tracker. " if total_gap else "")
+        + f"{risk_routes:,} route(s) require follow-up."
     )
     st.text_area("Copy-ready Daily Health note", value=brief, height=90)
+
+
+def render_gusto_lane_breakdown(ob_tracker: pd.DataFrame, progress: pd.DataFrame) -> None:
+    """Collapsible per-carrier expander showing GUSTO completion grouped by lane/location."""
+    if ob_tracker.empty:
+        return
+    carrier_col = first_matching_column(ob_tracker, [["carrier"]])
+    to_col = first_matching_column(ob_tracker, [["to"], ["po", "number"]])
+    location_col = first_matching_column(ob_tracker, [["locations"], ["location"]])
+    status_col = first_matching_column(ob_tracker, [["status"]])
+    lines_col = first_matching_column(ob_tracker, [["lines", "remaining"], ["lines"]])
+    units_col = first_matching_column(ob_tracker, [["units"]])
+    pallets_col = first_matching_column(ob_tracker, [["total", "pallets"], ["pallets"]])
+    if not carrier_col:
+        return
+
+    work = ob_tracker.copy()
+    work["_is_complete"] = (
+        work[status_col].fillna("").astype(str).str.casefold().str.contains(
+            "loaded|complete|closed", regex=True, na=False
+        )
+        if status_col else False
+    )
+    work["_route_key"] = work[carrier_col].map(normalize_route_key)
+
+    carrier_order = list(progress["Carrier"].map(normalize_route_key)) if not progress.empty else []
+
+    def sort_key(name: str) -> int:
+        key = normalize_route_key(name)
+        return carrier_order.index(key) if key in carrier_order else len(carrier_order)
+
+    carriers = sorted(work[carrier_col].dropna().unique(), key=sort_key)
+
+    st.markdown("---")
+    st.markdown("#### GUSTO Progress by Lane")
+    st.caption("Loaded vs open GUSTOs per carrier and delivery location. Expanders show open work only.")
+
+    for carrier in carriers:
+        carrier_rows = work[work[carrier_col].eq(carrier)].copy()
+        total = len(carrier_rows)
+        n_loaded = int(carrier_rows["_is_complete"].sum())
+        n_open = total - n_loaded
+        pct = n_loaded / total if total else 0
+
+        with st.expander(f"{carrier}  —  {n_loaded}/{total} loaded ({pct:.0%})  |  {n_open} open"):
+            open_rows = carrier_rows[~carrier_rows["_is_complete"]].copy()
+            if open_rows.empty:
+                st.success("All GUSTOs loaded for this carrier.")
+                continue
+
+            if location_col and not open_rows[location_col].astype(str).str.strip().eq("").all():
+                for lane, lane_rows in open_rows.groupby(location_col, dropna=False):
+                    lane_label = cell_text(lane) or "Unknown Location"
+                    st.markdown(f"**{lane_label}** — {len(lane_rows)} open")
+                    show_cols = [c for c in [to_col, status_col, lines_col, units_col, pallets_col] if c and c in lane_rows.columns]
+                    if show_cols:
+                        display = lane_rows[show_cols].copy()
+                        display.columns = [c.replace("_", " ").title() for c in show_cols]
+                        st.dataframe(display.reset_index(drop=True), use_container_width=True, hide_index=True)
+            else:
+                show_cols = [c for c in [to_col, status_col, lines_col, units_col, pallets_col] if c and c in open_rows.columns]
+                if show_cols:
+                    display = open_rows[show_cols].copy()
+                    display.columns = [c.replace("_", " ").title() for c in show_cols]
+                    st.dataframe(display.reset_index(drop=True), use_container_width=True, hide_index=True)
 
 
 def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
@@ -2639,19 +2865,13 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
                 "accent": "green" if units_nyp == 0 else "yellow",
             },
             {
-                "label": "Weight in Flow",
-                "value": format_number(total_weight),
-                "delta": f"{format_number(crossdock_count)} cross-dock lane(s)",
-                "accent": "neutral",
-            },
-            {
                 "label": "PO W/O Pallets",
                 "value": format_number(po_without_pallets),
                 "delta": "fill-rate exception queue",
                 "accent": "green" if po_without_pallets == 0 else "red",
             },
         ],
-        columns=6,
+        columns=5,
     )
 
     if not crossdock_summary.empty:
@@ -3765,6 +3985,29 @@ def sheets_to_fetch_for_tag(tag: str, sheet_names: list[str]) -> tuple[list[str]
             if any(token in sheet.casefold() for token in ["linehaul", "final mile", "inbound", "pricing", "rate", "cost"])
         ]
         return selected[:8] or clean_names[:2], "RFP lane and cost tabs"
+
+    if tag_key == "site information":
+        selected = [
+            sheet
+            for sheet in clean_names
+            if "site" in sheet.casefold() and "information" in sheet.casefold()
+        ]
+        return selected[:1] or clean_names[:1], "Site Information tab"
+
+    if tag_key == "s&op":
+        preferred_tokens = [
+            "airtable scbp",
+            "scbp assignment",
+            "gopuff hypercare",
+            "hypercare",
+            "dashboard",
+        ]
+        selected = [
+            sheet
+            for sheet in clean_names
+            if any(token in sheet.casefold() for token in preferred_tokens)
+        ]
+        return selected[:5] or clean_names[:1], "S&OP HyperCare tabs"
 
     return clean_names[:1], "first sheet only"
 
@@ -6344,7 +6587,7 @@ def render_schedule_sync(ship_allocation_records: pd.DataFrame) -> None:
         else:
             if context.fill_source:
                 st.caption(f"Fill Rate source: {context.fill_source}")
-            render_schedule_progress_visual(progress, context.ob_target_day, context.ob_sheet, context.ob_source)
+            render_schedule_progress_visual(progress, context.ob_target_day, context.ob_sheet, context.ob_source, context.ob_reason)
             open_loads = int(progress["Open TOs"].sum()) if "Open TOs" in progress.columns else 0
             loaded = int(progress["Loaded"].sum()) if "Loaded" in progress.columns else 0
             tos = int(progress["TOs"].sum()) if "TOs" in progress.columns else 0
@@ -6371,6 +6614,8 @@ def render_schedule_sync(ship_allocation_records: pd.DataFrame) -> None:
                 )
             else:
                 st.dataframe(progress, use_container_width=True, hide_index=True)
+
+            render_gusto_lane_breakdown(context.ob_tracker, progress)
 
             csv = progress.to_csv(index=False).encode("utf-8")
             st.download_button(
@@ -7056,31 +7301,29 @@ def read_google_sheet_best_table(
 def build_site_information_context() -> tuple[pd.DataFrame, str]:
     connection, site_info, sheet_name = read_google_sheet_best_table(
         "Site Information",
-        ["site", "market", "information"],
+        ["site", "information"],
     )
-    if site_info.empty:
-        connection, site_info, sheet_name = read_google_sheet_best_table("Other", ["site", "market", "information"])
     if site_info.empty:
         return pd.DataFrame(), ""
 
     location_col = first_matching_column(site_info, [["location", "name"], ["site", "name"]])
     site_id_col = first_matching_column(site_info, [["location", "id"], ["site", "id"]])
-    lane_col = first_matching_column(site_info, [["market"], ["lane"]])
+    # Site Information is the contacts-only source. Lane/market column A in the GoPuff Site
+    # Information sheet contains market codes that do not match Training Cheat Sheet lanes,
+    # so we deliberately exclude any lane or market column here to avoid polluting profile rows.
     keep_map = {
-        "Site Info Lane": lane_col,
         "Site Info Location Name": location_col,
         "Site Info Location ID": site_id_col,
         "Site Leader": first_matching_column(site_info, [["site", "leader"]]),
         "Regional Manager": first_matching_column(site_info, [["regional", "manager"]]),
         "Full Address": first_matching_column(site_info, [["full", "address"]]),
         "SCBP": first_matching_column(site_info, [["scbp"]]),
-        "Site Type": first_matching_column(site_info, [["site", "type"], ["location", "type"], ["type"]]),
-        "Site Status": first_matching_column(site_info, [["status"], ["site", "status"]]),
-        "Network Role": first_matching_column(site_info, [["network", "role"], ["role"]]),
         "City": first_matching_column(site_info, [["city"]]),
         "State": first_matching_column(site_info, [["state"]]),
         "Postal Code": first_matching_column(site_info, [["postal"], ["zip"]]),
     }
+    if not location_col and not site_id_col:
+        return pd.DataFrame(), sheet_name
     keep_cols = list(dict.fromkeys(col for col in keep_map.values() if col))
     if not keep_cols:
         return pd.DataFrame(), sheet_name
@@ -7088,6 +7331,7 @@ def build_site_information_context() -> tuple[pd.DataFrame, str]:
     result = result.rename(columns={source: target for target, source in keep_map.items() if source})
     result["_site_id_key"] = result.get("Site Info Location ID", pd.Series("", index=result.index)).map(compact_site_id)
     result["_location_key"] = result.get("Site Info Location Name", pd.Series("", index=result.index)).map(compact_location_key)
+    result = result[result["_site_id_key"].str.strip().ne("") | result["_location_key"].str.strip().ne("")]
     return result.drop_duplicates(["_site_id_key", "_location_key"]), sheet_name
 
 
@@ -7129,6 +7373,37 @@ def build_allocation_operating_context() -> tuple[pd.DataFrame, str]:
     result["_has_order"] = result.get("Active GUSTO", pd.Series("", index=result.index)).astype(str).str.strip().ne("")
     result = result[result["_has_order"]].copy() if result["_has_order"].any() else result
     return result.drop_duplicates(["_site_id_key", "_location_key"], keep="last"), sheet_name
+
+
+def build_scbp_assignment_context() -> tuple[pd.DataFrame, str]:
+    connection = latest_google_sheet_by_type("S&OP")
+    if connection is None:
+        return pd.DataFrame(), ""
+    scbp_data = read_google_sheet_named_table(connection, "Airtable SCBP Assignments")
+    if scbp_data.empty:
+        return pd.DataFrame(), ""
+    location_col = first_matching_column(scbp_data, [["location", "name"]])
+    scbp_name_col = first_matching_column(scbp_data, [["scbp", "name"]])
+    slack_col = first_matching_column(scbp_data, [["slack", "channel", "name"], ["slack", "channel"]])
+    rm_col = first_matching_column(scbp_data, [["rm", "first"], ["rm"], ["regional", "manager"]])
+    if not location_col:
+        return pd.DataFrame(), "Airtable SCBP Assignments"
+    keep_map = {
+        "SCBP Assignment Location": location_col,
+        "SCBP": scbp_name_col,
+        "Slack Channel": slack_col,
+        "Regional Manager": rm_col,
+    }
+    keep_cols = list(dict.fromkeys(col for col in keep_map.values() if col))
+    result = scbp_data[keep_cols].copy()
+    result = result.rename(columns={source: target for target, source in keep_map.items() if source})
+    for col in ["SCBP", "Slack Channel", "Regional Manager"]:
+        if col in result.columns:
+            result[col] = result[col].astype(str).str.strip().replace({"#REF!": "", "nan": ""})
+    result["_location_key"] = result["SCBP Assignment Location"].astype(str).map(compact_location_key)
+    result = result[result["_location_key"].str.strip().ne("")]
+    result["_site_id_key"] = ""
+    return result.drop_duplicates("_location_key"), "Airtable SCBP Assignments"
 
 
 def build_sop_hypercare_context() -> tuple[pd.DataFrame, str]:
@@ -7210,6 +7485,11 @@ def enrich_market_profile_operating_context(profile: pd.DataFrame) -> tuple[pd.D
     if not site_info.empty:
         context_sources["Site Information"] = site_sheet
         enriched = fill_context_by_profile_keys(enriched, site_info)
+
+    scbp_assignments, scbp_sheet = build_scbp_assignment_context()
+    if not scbp_assignments.empty:
+        context_sources["SCBP Assignments"] = scbp_sheet
+        enriched = fill_context_by_profile_keys(enriched, scbp_assignments)
 
     allocations, allocation_sheet = build_allocation_operating_context()
     if not allocations.empty:
