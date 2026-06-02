@@ -588,8 +588,16 @@ h1 {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.gp-kpi-grid--5 {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .gp-kpi-grid--6 {
   grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.gp-kpi-grid--7 {
+  grid-template-columns: repeat(7, minmax(0, 1fr));
 }
 
 .gp-kpi-card {
@@ -598,8 +606,8 @@ h1 {
   border-left: 5px solid #64748b;
   border-radius: 8px;
   box-shadow: 0 10px 22px rgba(15, 35, 55, 0.08);
-  min-height: 116px;
-  padding: 0.85rem 0.85rem 0.8rem;
+  min-height: 80px;
+  padding: 0.65rem 0.75rem 0.6rem;
 }
 
 .gp-kpi-card--green {
@@ -629,19 +637,19 @@ h1 {
 
 .gp-kpi-card__value {
   color: #132235 !important;
-  font-size: 1.55rem;
+  font-size: 1.35rem;
   font-weight: 900;
   line-height: 1.1;
-  margin-top: 0.45rem;
+  margin-top: 0.3rem;
   overflow-wrap: anywhere;
   text-shadow: none !important;
 }
 
 .gp-kpi-card__delta {
   color: #64748b !important;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   font-weight: 750;
-  margin-top: 0.45rem;
+  margin-top: 0.3rem;
   text-shadow: none !important;
 }
 
@@ -1262,15 +1270,19 @@ input {
   }
 
   .gp-kpi-grid--4,
-  .gp-kpi-grid--6 {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .gp-kpi-grid--5,
+  .gp-kpi-grid--6,
+  .gp-kpi-grid--7 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 560px) {
   .gp-kpi-grid--4,
+  .gp-kpi-grid--5,
   .gp-kpi-grid--6,
+  .gp-kpi-grid--7,
   .gp-risk-card__metrics {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
