@@ -218,6 +218,10 @@ EMBED_TARGETS = {
     "decision_chat": "Decision Support Chat",
     "claude_chat": "Decision Support Chat",
     "resource_library": "Resource Library Profiles",
+    "about": "About / User Guide",
+    "user_guide": "About / User Guide",
+    "guide": "About / User Guide",
+    "help": "About / User Guide",
 }
 COMMAND_CENTER_DEFAULTS = {
     "created": 0,
@@ -8121,9 +8125,19 @@ def render_google_sites_embed(embed_mode: str) -> None:
         render_executive_note_embed(context, health, ops_data)
     elif embed_mode in {"market_profiles", "mfc_lookup", "mfc_profiles", "mfc_network_map", "resource_library"}:
         render_market_profiles()
+    elif embed_mode in {"about", "user_guide", "guide", "help"}:
+        render_about_guide()
     else:
         render_embed_catalog()
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_about_guide() -> None:
+    about_path = Path("ABOUT.md")
+    if about_path.exists():
+        st.markdown(about_path.read_text(), unsafe_allow_html=False)
+    else:
+        st.warning("ABOUT.md not found in the app directory.")
 
 
 def render_cost_lane_intelligence() -> None:
