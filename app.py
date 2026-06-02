@@ -25,8 +25,12 @@ LOGO_PATH = Path("assets/gopuff-logo.png")
 GOOGLE_CREDENTIALS_PATH = Path("google_credentials.json")
 GOOGLE_TOKEN_PATH = Path("data/google_token.json")
 LIVE_GOOGLE_ONLY = True
-GOOGLE_REFRESH_SCHEDULE_HOURS = [4, 16]
-AUTO_REFRESH_CHECK_MINUTES = 15
+# Full refresh (all connected sheets) runs every 4 hours during operational hours plus a 4 AM overnight run.
+GOOGLE_REFRESH_SCHEDULE_HOURS = [4, 5, 9, 13, 17, 21]
+# Live refresh (OB Tracker + Fill Rate only) runs every hour from 5 AM through 11 PM.
+GOOGLE_LIVE_REFRESH_HOURS = list(range(5, 24))
+GOOGLE_LIVE_SHEET_TYPES = ["OB TO Tracker", "Fill Rate"]
+AUTO_REFRESH_CHECK_MINUTES = 5
 STATUS_OPTIONS = ["Not Tendered", "Tendered", "Confirmed", "At Risk", "Escalated"]
 LEAN_MATRIX_COLUMNS = ["area", "owner", "deadline", "status", "notes"]
 LEAN_MATRIX_STATUS_OPTIONS = ["Not Started", "In Progress", "Blocked", "Complete", "Sustained"]
@@ -4317,21 +4321,51 @@ def list_google_refresh_runs(limit: int = 10) -> pd.DataFrame:
         )
 
 
-def run_scheduled_google_refresh_if_due() -> list[str]:
-    slot = scheduled_google_refresh_slot()
-    if slot is None:
-        return []
-    slot_key, scheduled_at = slot
-    if google_refresh_slot_has_run(slot_key):
-        return []
+def scheduled_live_refresh_slot(now: datetime | None = None) -> tuple[str, datetime] | None:
+    """Return the most recent live-refresh slot (hourly during operational hours)."""
+    current = now or datetime.now()
+    due_hours = [hour for hour in GOOGLE_LIVE_REFRESH_HOURS if current.hour >= hour]
+    if not due_hours:
+        return None
+    slot_hour = max(due_hours)
+    scheduled_at = current.replace(hour=slot_hour, minute=0, second=0, microsecond=0)
+    return f"live-{scheduled_at:%Y-%m-%d-%H}", scheduled_at
 
-    try:
-        messages = refresh_google_sheet_connections()
-        status = "success" if not any("failed" in message.casefold() for message in messages) else "partial"
-    except Exception as exc:
-        messages = [f"Scheduled Google Sheet refresh failed - {exc}"]
-        status = "failed"
-    record_google_refresh_run(slot_key, scheduled_at, status, messages)
+
+def run_scheduled_google_refresh_if_due() -> list[str]:
+    messages: list[str] = []
+
+    # Tier 1 — full refresh every 4 hours (all connected sheets)
+    full_slot = scheduled_google_refresh_slot()
+    if full_slot is not None:
+        full_key, full_at = full_slot
+        if not google_refresh_slot_has_run(full_key):
+            try:
+                full_messages = refresh_google_sheet_connections()
+                status = "success" if not any("failed" in m.casefold() for m in full_messages) else "partial"
+                messages.extend(full_messages)
+            except Exception as exc:
+                full_messages = [f"Full scheduled refresh failed — {exc}"]
+                status = "failed"
+                messages.extend(full_messages)
+            record_google_refresh_run(full_key, full_at, status, full_messages)
+            return messages  # Full refresh covers everything; skip live-only check
+
+    # Tier 2 — live-only refresh every hour (OB Tracker + Fill Rate)
+    live_slot = scheduled_live_refresh_slot()
+    if live_slot is not None:
+        live_key, live_at = live_slot
+        if not google_refresh_slot_has_run(live_key):
+            try:
+                live_messages = refresh_google_sheet_types(GOOGLE_LIVE_SHEET_TYPES)
+                status = "success" if not any("failed" in m.casefold() for m in live_messages) else "partial"
+                messages.extend(live_messages)
+            except Exception as exc:
+                live_messages = [f"Live scheduled refresh failed — {exc}"]
+                status = "failed"
+                messages.extend(live_messages)
+            record_google_refresh_run(live_key, live_at, status, live_messages)
+
     return messages
 
 
