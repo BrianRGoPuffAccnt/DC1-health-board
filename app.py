@@ -1932,25 +1932,43 @@ def select_ob_tracker_sheet(sheet_names: list[str], day: datetime | pd.Timestamp
 
 
 def select_ob_tracker_sheets(sheet_names: list[str], n: int = 3) -> list[tuple[pd.Timestamp, str]]:
-    """Return up to n most recent dated OB Tracker tabs, sorted oldest-first for concat ordering."""
+    """Return up to n OB Tracker tabs anchored by Mix Label position.
+
+    Tab layout (right to left): [...older..., day-2, yesterday, today, Mix Label]
+    Position 1 left of Mix Label = today's active work.
+    Position 2 left = yesterday's tab — may have rollover open GUSTOs.
+    Position 3+ = completed prior days (loaded as context/dedup only).
+    """
     clean_names = [sheet for sheet in sheet_names if str(sheet).strip()]
     today = pd.Timestamp.now().normalize()
-    dated: list[tuple[pd.Timestamp, str]] = []
-    for sheet in clean_names:
-        if "mix label" in str(sheet).casefold():
-            continue
+
+    # Separate out Mix Label and get the working tabs to its left
+    mix_label_idx = next(
+        (i for i, s in enumerate(clean_names) if "mix label" in str(s).casefold()),
+        len(clean_names),
+    )
+    # Tabs before Mix Label, in sheet order (left to right)
+    pre_mix = clean_names[:mix_label_idx]
+
+    # Try to use position-anchored approach: last n tabs before Mix Label
+    candidates = pre_mix[-n:] if len(pre_mix) >= n else pre_mix
+    if not candidates:
+        return [(today, s) for s in clean_names[-n:] if "mix label" not in str(s).casefold()]
+
+    result: list[tuple[pd.Timestamp, str]] = []
+    for sheet in candidates:
         parsed = parse_date_sheet_name(str(sheet))
-        if parsed is None:
-            continue
-        month, day_num = parsed
-        candidate = pd.Timestamp(year=today.year, month=month, day=day_num)
-        if candidate <= today:
-            dated.append((candidate, sheet))
-    if not dated:
-        usable = [s for s in clean_names if "mix label" not in str(s).casefold()]
-        return [(today, s) for s in usable[-n:]]
-    dated.sort(key=lambda x: x[0])
-    return dated[-n:]
+        if parsed is not None:
+            month, day_num = parsed
+            tab_date = pd.Timestamp(year=today.year, month=month, day=day_num)
+        else:
+            # Non-dated tab — assign an approximate date based on position
+            tab_date = today - pd.Timedelta(days=len(candidates) - candidates.index(sheet) - 1)
+        result.append((tab_date, sheet))
+
+    # Sort oldest first so concat ordering is chronological (latest tab wins in dedup)
+    result.sort(key=lambda x: x[0])
+    return result
 
 
 def load_multi_tab_ob_tracker(
@@ -1964,6 +1982,8 @@ def load_multi_tab_ob_tracker(
     tabs = select_ob_tracker_sheets(sheet_names, n)
     if not tabs:
         return pd.DataFrame(), [], previous_working_day(), "no dated tabs found"
+    today = pd.Timestamp.now().normalize()
+    yesterday = today - pd.Timedelta(days=1)
     frames: list[pd.DataFrame] = []
     for tab_date, tab_name in tabs:
         df = read_google_sheet_named_table(ob_google, tab_name)
@@ -1972,6 +1992,13 @@ def load_multi_tab_ob_tracker(
         df = df.copy()
         df["_ob_tab"] = tab_name
         df["_ob_tab_date"] = tab_date
+        # Label each row's day context for display purposes
+        if tab_date >= today:
+            df["_ob_day_label"] = "Today"
+        elif tab_date >= yesterday:
+            df["_ob_day_label"] = "Rollover (Yesterday)"
+        else:
+            df["_ob_day_label"] = f"Prior ({tab_name})"
         frames.append(df)
     if not frames:
         tab_names = [t for _, t in tabs]
@@ -2453,6 +2480,11 @@ def build_schedule_progress(sdt: pd.DataFrame, tracker: pd.DataFrame) -> tuple[p
     work["Status Clean"] = work[status_col].fillna("Unknown").astype(str).str.strip() if status_col else "Unknown"
     work["is_complete"] = work["Status Clean"].str.casefold().str.contains("loaded|complete|closed", regex=True, na=False)
     work["is_active"] = work["Status Clean"].str.casefold().str.contains("picking|staged|allocated", regex=True, na=False)
+    work["is_rollover"] = (
+        work["_ob_day_label"].str.startswith("Rollover") & ~work["is_complete"]
+        if "_ob_day_label" in work.columns
+        else False
+    )
 
     grouped = (
         work.groupby(["_route_key", carrier_col], dropna=False)
@@ -2461,6 +2493,7 @@ def build_schedule_progress(sdt: pd.DataFrame, tracker: pd.DataFrame) -> tuple[p
             Locations=(location_col if location_col else carrier_col, "nunique"),
             Loaded=("is_complete", "sum"),
             Active=("is_active", "sum"),
+            Rollover=("is_rollover", "sum"),
             Lines_Remaining=("Lines Remaining", "sum"),
             Units=("Units", "sum"),
             Pallets=("Pallets", "sum"),
@@ -2484,6 +2517,7 @@ def build_schedule_progress(sdt: pd.DataFrame, tracker: pd.DataFrame) -> tuple[p
         "TOs",
         "Loaded",
         "Open TOs",
+        "Rollover",
         "Active",
         "Lines_Remaining",
         "Units",
@@ -2758,9 +2792,21 @@ def render_gusto_lane_breakdown(ob_tracker: pd.DataFrame, progress: pd.DataFrame
 
     carriers = sorted(work[carrier_col].dropna().unique(), key=sort_key)
 
+    has_day_label = "_ob_day_label" in work.columns
+
+    # Count total rollover open GUSTOs across all carriers for the section header
+    rollover_open = 0
+    if has_day_label:
+        rollover_open = int(
+            work[(~work["_is_complete"]) & work["_ob_day_label"].str.startswith("Rollover")].shape[0]
+        )
+
     st.markdown("---")
     st.markdown("#### GUSTO Progress by Lane")
-    st.caption("Loaded vs open GUSTOs per carrier and delivery location. Expanders show open work only.")
+    caption = "Loaded vs open GUSTOs per carrier and delivery location. Expanders show open work only."
+    if rollover_open:
+        caption += f"  **{rollover_open} rollover GUSTO(s) from yesterday are still open.**"
+    st.caption(caption)
 
     for carrier in carriers:
         carrier_rows = work[work[carrier_col].eq(carrier)].copy()
@@ -2769,25 +2815,49 @@ def render_gusto_lane_breakdown(ob_tracker: pd.DataFrame, progress: pd.DataFrame
         n_open = total - n_loaded
         pct = n_loaded / total if total else 0
 
-        with st.expander(f"{carrier}  —  {n_loaded}/{total} loaded ({pct:.0%})  |  {n_open} open"):
+        # Count rollovers specifically for this carrier
+        n_rollover = 0
+        if has_day_label:
+            n_rollover = int(
+                carrier_rows[
+                    (~carrier_rows["_is_complete"]) & carrier_rows["_ob_day_label"].str.startswith("Rollover")
+                ].shape[0]
+            )
+        rollover_tag = f"  ⚠ {n_rollover} rollover" if n_rollover else ""
+
+        with st.expander(f"{carrier}  —  {n_loaded}/{total} loaded ({pct:.0%})  |  {n_open} open{rollover_tag}"):
             open_rows = carrier_rows[~carrier_rows["_is_complete"]].copy()
             if open_rows.empty:
                 st.success("All GUSTOs loaded for this carrier.")
                 continue
 
-            if location_col and not open_rows[location_col].astype(str).str.strip().eq("").all():
-                for lane, lane_rows in open_rows.groupby(location_col, dropna=False):
-                    lane_label = cell_text(lane) or "Unknown Location"
-                    st.markdown(f"**{lane_label}** — {len(lane_rows)} open")
-                    show_cols = [c for c in [to_col, status_col, lines_col, units_col, pallets_col] if c and c in lane_rows.columns]
-                    if show_cols:
-                        display = lane_rows[show_cols].copy()
-                        display.columns = [c.replace("_", " ").title() for c in show_cols]
-                        st.dataframe(display.reset_index(drop=True), use_container_width=True, hide_index=True)
-            else:
-                show_cols = [c for c in [to_col, status_col, lines_col, units_col, pallets_col] if c and c in open_rows.columns]
-                if show_cols:
-                    display = open_rows[show_cols].copy()
+            # Split display into Today vs Rollover sections when day labels are available
+            day_groups = (
+                [("Rollover (Yesterday)", open_rows[open_rows["_ob_day_label"].str.startswith("Rollover")]),
+                 ("Today", open_rows[open_rows["_ob_day_label"].eq("Today")]),
+                 ("Other", open_rows[~open_rows["_ob_day_label"].str.startswith("Rollover") & open_rows["_ob_day_label"].ne("Today")])]
+                if has_day_label
+                else [("Open", open_rows)]
+            )
+
+            for day_label, day_rows in day_groups:
+                if day_rows.empty:
+                    continue
+                is_rollover = "Rollover" in day_label
+                prefix = "⚠ " if is_rollover else ""
+                st.markdown(f"**{prefix}{day_label}** — {len(day_rows)} open GUSTO(s)")
+
+                show_cols = [c for c in [to_col, status_col, lines_col, units_col, pallets_col] if c and c in day_rows.columns]
+                if location_col and not day_rows[location_col].astype(str).str.strip().eq("").all():
+                    for lane, lane_rows in day_rows.groupby(location_col, dropna=False):
+                        lane_label = cell_text(lane) or "Unknown Location"
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;**{lane_label}** — {len(lane_rows)}")
+                        if show_cols:
+                            display = lane_rows[show_cols].copy()
+                            display.columns = [c.replace("_", " ").title() for c in show_cols]
+                            st.dataframe(display.reset_index(drop=True), use_container_width=True, hide_index=True)
+                elif show_cols:
+                    display = day_rows[show_cols].copy()
                     display.columns = [c.replace("_", " ").title() for c in show_cols]
                     st.dataframe(display.reset_index(drop=True), use_container_width=True, hide_index=True)
 
