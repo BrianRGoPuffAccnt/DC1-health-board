@@ -8133,6 +8133,87 @@ def render_google_sites_embed(embed_mode: str) -> None:
 
 
 def render_about_guide() -> None:
+    st.markdown(
+        """
+        <style>
+        section[data-testid="stMain"] > div,
+        .main .block-container {
+            background: #0c3b4f !important;
+        }
+        .stApp, [data-testid="stAppViewContainer"] {
+            background: #0c3b4f !important;
+        }
+        .stMarkdown p, .stMarkdown li, .stMarkdown td, .stMarkdown th,
+        .stMarkdown span, .stMarkdown strong, .stMarkdown em {
+            color: #d6eaf4 !important;
+            text-shadow: none !important;
+        }
+        .stMarkdown h1 {
+            color: #ffffff !important;
+            font-size: 1.7rem !important;
+            border-bottom: 2px solid #1e6a8a;
+            padding-bottom: 0.4rem;
+        }
+        .stMarkdown h2 {
+            color: #7dcfee !important;
+            font-size: 1.25rem !important;
+            margin-top: 1.5rem;
+            border-bottom: 1px solid #1e6a8a;
+            padding-bottom: 0.25rem;
+        }
+        .stMarkdown h3 {
+            color: #a8dff5 !important;
+            font-size: 1.05rem !important;
+            margin-top: 1.1rem;
+        }
+        .stMarkdown table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 0.75rem 0 1.25rem;
+            background: #083244 !important;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .stMarkdown th {
+            background: #062a3a !important;
+            color: #7dcfee !important;
+            padding: 0.5rem 0.85rem;
+            text-align: left;
+            font-size: 0.78rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .stMarkdown td {
+            padding: 0.45rem 0.85rem;
+            border-bottom: 1px solid #135570;
+            color: #d6eaf4 !important;
+            font-size: 0.88rem;
+        }
+        .stMarkdown tr:last-child td { border-bottom: none; }
+        .stMarkdown code {
+            background: #062a3a !important;
+            color: #7dcfee !important;
+            padding: 0.15em 0.4em;
+            border-radius: 4px;
+            font-size: 0.85em;
+        }
+        .stMarkdown pre {
+            background: #062a3a !important;
+            border: 1px solid #135570;
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+            overflow-x: auto;
+        }
+        .stMarkdown pre code { background: transparent !important; }
+        .stMarkdown hr {
+            border: none;
+            border-top: 1px solid #1e6a8a;
+            margin: 1.5rem 0;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     about_path = Path("ABOUT.md")
     if about_path.exists():
         st.markdown(about_path.read_text(), unsafe_allow_html=False)
