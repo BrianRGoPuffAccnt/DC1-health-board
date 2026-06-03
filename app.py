@@ -1956,14 +1956,18 @@ def select_ob_tracker_sheets(sheet_names: list[str], n: int = 3) -> list[tuple[p
         return [(today, s) for s in clean_names[-n:] if "mix label" not in str(s).casefold()]
 
     result: list[tuple[pd.Timestamp, str]] = []
-    for sheet in candidates:
+    for idx, sheet in enumerate(candidates):
         parsed = parse_date_sheet_name(str(sheet))
         if parsed is not None:
             month, day_num = parsed
             tab_date = pd.Timestamp(year=today.year, month=month, day=day_num)
+            # Skip future-dated tabs (e.g. a pre-created tomorrow tab, or a Dec tab seen in Jan
+            # with an incorrect year assigned).  Only load tabs on or before today.
+            if tab_date > today:
+                continue
         else:
-            # Non-dated tab — assign an approximate date based on position
-            tab_date = today - pd.Timedelta(days=len(candidates) - candidates.index(sheet) - 1)
+            # Non-dated tab — assign an approximate date by position (oldest = furthest left)
+            tab_date = today - pd.Timedelta(days=len(candidates) - idx - 1)
         result.append((tab_date, sheet))
 
     # Sort oldest first so concat ordering is chronological (latest tab wins in dedup)
@@ -2485,6 +2489,9 @@ def build_schedule_progress(sdt: pd.DataFrame, tracker: pd.DataFrame) -> tuple[p
         if "_ob_day_label" in work.columns
         else False
     )
+    work["is_picking"] = work["Status Clean"].str.casefold().str.contains("picking", na=False)
+    work["is_staged"] = work["Status Clean"].str.casefold().str.contains("staged", na=False)
+    work["is_allocated"] = work["Status Clean"].str.casefold().str.contains("allocated", na=False)
 
     grouped = (
         work.groupby(["_route_key", carrier_col], dropna=False)
@@ -2494,6 +2501,9 @@ def build_schedule_progress(sdt: pd.DataFrame, tracker: pd.DataFrame) -> tuple[p
             Loaded=("is_complete", "sum"),
             Active=("is_active", "sum"),
             Rollover=("is_rollover", "sum"),
+            Picking=("is_picking", "sum"),
+            Staged=("is_staged", "sum"),
+            Allocated=("is_allocated", "sum"),
             Lines_Remaining=("Lines Remaining", "sum"),
             Units=("Units", "sum"),
             Pallets=("Pallets", "sum"),
@@ -2519,6 +2529,9 @@ def build_schedule_progress(sdt: pd.DataFrame, tracker: pd.DataFrame) -> tuple[p
         "Open TOs",
         "Rollover",
         "Active",
+        "Picking",
+        "Staged",
+        "Allocated",
         "Lines_Remaining",
         "Units",
         "Pallets",
@@ -2599,6 +2612,7 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
     total_tos = int(progress["TOs"].sum()) if "TOs" in progress.columns else 0
     loaded = int(progress["Loaded"].sum()) if "Loaded" in progress.columns else 0
     open_tos = int(progress["Open TOs"].sum()) if "Open TOs" in progress.columns else 0
+    rollover_open = int(progress["Rollover"].sum()) if "Rollover" in progress.columns else 0
     work_remaining = int(progress["Lines_Remaining"].sum()) if "Lines_Remaining" in progress.columns else 0
     risk_routes = int(progress["Timing Risk"].ne("Normal").sum()) if "Timing Risk" in progress.columns else 0
     units_nyp = int(progress["Units_NYP"].sum()) if "Units_NYP" in progress.columns else 0
@@ -2623,22 +2637,24 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
     total_gap = int(progress["Gap"].sum()) if "Gap" in progress.columns else 0
 
     if total_allocated:
-        metric_cols = st.columns(7)
+        metric_cols = st.columns(8)
         metric_cols[0].metric("Window Health", status)
         metric_cols[1].metric("Allocated", format_number(total_allocated))
         metric_cols[2].metric("TO Progress", f"{loaded:,} / {total_tos:,}", format_percent(progress_rate))
         metric_cols[3].metric("Open TOs", format_number(open_tos))
-        metric_cols[4].metric("Not in OB Yet", format_number(total_gap))
-        metric_cols[5].metric("Lines Remaining", format_number(work_remaining))
-        metric_cols[6].metric("Units NYP", format_number(units_nyp))
+        metric_cols[4].metric("Rollover Open", format_number(rollover_open))
+        metric_cols[5].metric("Not in OB Yet", format_number(total_gap))
+        metric_cols[6].metric("Lines Remaining", format_number(work_remaining))
+        metric_cols[7].metric("Units NYP", format_number(units_nyp))
     else:
-        metric_cols = st.columns(6)
+        metric_cols = st.columns(7)
         metric_cols[0].metric("Window Health", status)
         metric_cols[1].metric("Routes", format_number(total_routes))
         metric_cols[2].metric("TO Progress", f"{loaded:,} / {total_tos:,}", format_percent(progress_rate))
         metric_cols[3].metric("Open TOs", format_number(open_tos))
-        metric_cols[4].metric("Lines Remaining", format_number(work_remaining))
-        metric_cols[5].metric("Units NYP", format_number(units_nyp))
+        metric_cols[4].metric("Rollover Open", format_number(rollover_open))
+        metric_cols[5].metric("Lines Remaining", format_number(work_remaining))
+        metric_cols[6].metric("Units NYP", format_number(units_nyp))
 
     chart_df = progress.copy()
     chart_df["Progress Display"] = chart_df["Progress %"].fillna(0) if "Progress %" in chart_df.columns else 0
@@ -2803,10 +2819,9 @@ def render_gusto_lane_breakdown(ob_tracker: pd.DataFrame, progress: pd.DataFrame
 
     st.markdown("---")
     st.markdown("#### GUSTO Progress by Lane")
-    caption = "Loaded vs open GUSTOs per carrier and delivery location. Expanders show open work only."
+    st.caption("Loaded vs open GUSTOs per carrier and delivery location. Expanders show open work only.")
     if rollover_open:
-        caption += f"  **{rollover_open} rollover GUSTO(s) from yesterday are still open.**"
-    st.caption(caption)
+        st.markdown(f"**⚠ {rollover_open} rollover GUSTO(s) from yesterday are still open and need to be closed out.**")
 
     for carrier in carriers:
         carrier_rows = work[work[carrier_col].eq(carrier)].copy()
@@ -3340,6 +3355,78 @@ def render_enterprise_risk_cards(risks: pd.DataFrame) -> None:
     st.markdown('<div class="gp-risk-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
 
 
+def render_departure_schedule(progress: pd.DataFrame) -> None:
+    """Ordered departure schedule cards — replaces the window-mix donut in the live metrics embed."""
+    if progress.empty:
+        st.caption("No departure windows available.")
+        return
+
+    def readiness_label(row: pd.Series) -> str:
+        if int(row.get("Picking", 0)) > 0:
+            return "In Progress"
+        if int(row.get("Open TOs", 0)) == 0:
+            return "Loaded"
+        return "Ready"
+
+    def stage_pct(row: pd.Series) -> float:
+        total = int(row.get("TOs", 0))
+        if not total:
+            return 0.0
+        done = int(row.get("Staged", 0)) + int(row.get("Loaded", 0))
+        return min(done / total, 1.0)
+
+    ws_row_color = {
+        "Past Departure": "red",
+        "In Window": "yellow",
+        "Upcoming": "blue",
+        "No SDT Window": "neutral",
+        "Complete": "green",
+    }
+    readiness_pill_color = {"In Progress": "yellow", "Ready": "blue", "Loaded": "green"}
+    bar_color = lambda p: "green" if p >= 0.9 else "yellow" if p >= 0.5 else "red"
+
+    disp = progress.copy()
+    window_order = {"Past Departure": 0, "In Window": 1, "Upcoming": 2, "No SDT Window": 3, "Complete": 4}
+    disp["_w_order"] = disp.get("Window Status", pd.Series(dtype=str)).map(window_order).fillna(5)
+    if "_depart_dt" in disp.columns:
+        disp["_depart_sort"] = pd.to_datetime(disp["_depart_dt"], errors="coerce").fillna(pd.Timestamp("2099-01-01"))
+    else:
+        disp["_depart_sort"] = pd.Timestamp("2099-01-01")
+    disp = disp.sort_values(["_w_order", "_depart_sort"]).reset_index(drop=True)
+
+    rows_html: list[str] = []
+    for _, row in disp.iterrows():
+        ws = str(row.get("Window Status", "No SDT Window"))
+        row_color = ws_row_color.get(ws, "neutral")
+        carrier = html.escape(str(row.get("Carrier", "Unknown")))
+        depart = html.escape(str(row.get("Departure Time", "—")))
+        open_tos = int(row.get("Open TOs", 0))
+        r_label = readiness_label(row)
+        r_color = readiness_pill_color.get(r_label, "neutral")
+        pct = stage_pct(row)
+        bc = bar_color(pct)
+        pct_str = f"{pct:.0%}"
+        rows_html.append(
+            f'<div class="gp-depart-row gp-depart-row--{row_color}">'
+            f'<div class="gp-depart-row__topline">'
+            f'<div class="gp-depart-row__carrier">{carrier}</div>'
+            f'<div class="gp-depart-row__time">Depart {depart}</div>'
+            f'</div>'
+            f'<div class="gp-depart-row__bottom">'
+            f'<span class="gp-status-pill gp-status-pill--{r_color}">{r_label}</span>'
+            f'<div class="gp-progress-cell" style="flex:1;min-width:0;">'
+            f'<div class="gp-progress-track">'
+            f'<div class="gp-progress-fill gp-progress-fill--{bc}" style="width:{pct:.0%};"></div>'
+            f'</div>'
+            f'<span>{pct_str}</span>'
+            f'</div>'
+            f'<div class="gp-depart-row__open">{open_tos} open</div>'
+            f'</div>'
+            f'</div>'
+        )
+    st.markdown('<div class="gp-depart-wrap">' + "".join(rows_html) + "</div>", unsafe_allow_html=True)
+
+
 def render_brief_panel(title: str, body: str) -> None:
     st.markdown(
         f'<div class="gp-brief-panel"><div class="gp-brief-panel__title">{html.escape(title)}</div></div>',
@@ -3671,35 +3758,8 @@ def render_live_update(context: DailyHealthContext) -> None:
         render_enterprise_risk_cards(risks)
         render_open_tos_drilldown(context)
     with risk_cols[1]:
-        st.markdown('<div class="gp-section-label">Window Mix</div>', unsafe_allow_html=True)
-        window_counts = context.progress.get("Window Status", pd.Series(dtype=str)).value_counts().reset_index()
-        window_counts.columns = ["Window Status", "Routes"]
-        if window_counts.empty:
-            st.caption("No window status data available.")
-        else:
-            fig = px.pie(
-                window_counts,
-                names="Window Status",
-                values="Routes",
-                hole=0.58,
-                color="Window Status",
-                color_discrete_map={
-                    "Complete": "#2f6f4e",
-                    "Upcoming": "#3c78a8",
-                    "In Window": "#b7791f",
-                    "Past Departure": "#b42318",
-                    "No SDT Window": "#64748b",
-                },
-            )
-            fig.update_layout(
-                height=330,
-                margin=dict(l=10, r=10, t=10, b=10),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#1f2937"),
-                legend=dict(orientation="h", y=-0.08),
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        st.markdown('<div class="gp-section-label">Departure Schedule</div>', unsafe_allow_html=True)
+        render_departure_schedule(context.progress)
 
     render_brief_panel("Copy-ready live briefing feed", make_live_update_note(context))
 
@@ -4419,7 +4479,14 @@ def run_scheduled_google_refresh_if_due() -> list[str]:
                 status = "failed"
                 messages.extend(full_messages)
             record_google_refresh_run(full_key, full_at, status, full_messages)
-            return messages  # Full refresh covers everything; skip live-only check
+            # Also mark the live slot as done so it doesn't fire on every subsequent
+            # page load this hour (full refresh already covered those sheets).
+            live_slot = scheduled_live_refresh_slot()
+            if live_slot is not None:
+                live_key, live_at = live_slot
+                if not google_refresh_slot_has_run(live_key):
+                    record_google_refresh_run(live_key, live_at, "covered_by_full", [])
+            return messages
 
     # Tier 2 — live-only refresh every hour (OB Tracker + Fill Rate)
     live_slot = scheduled_live_refresh_slot()
@@ -9749,10 +9816,13 @@ def main() -> None:
         if not google_connections.empty:
             st.subheader("Connected Google Sheets")
             current_slot = scheduled_google_refresh_slot()
-            next_schedule = "4:00 AM today" if datetime.now().hour < 4 else "4:00 PM today" if datetime.now().hour < 16 else "4:00 AM tomorrow"
+            _full_hours = ", ".join(
+                f"{h % 12 or 12}{'AM' if h < 12 else 'PM'}" for h in GOOGLE_REFRESH_SCHEDULE_HOURS
+            )
             schedule_caption = (
-                f"Auto-refresh is active. The app checks every {AUTO_REFRESH_CHECK_MINUTES} minutes while the Streamlit server is running "
-                f"and refreshes once after each 4:00 AM / 4:00 PM slot. Next slot: {next_schedule}."
+                f"Auto-refresh is active. The app checks every {AUTO_REFRESH_CHECK_MINUTES} minutes while the Streamlit server is running. "
+                f"Full refresh (all sheets) runs at {_full_hours}. "
+                f"Live refresh (OB Tracker + Fill Rate) runs every hour from 5 AM–11 PM."
             )
             if current_slot and google_refresh_slot_has_run(current_slot[0]):
                 schedule_caption += f" Current slot {current_slot[0]} has already refreshed."
