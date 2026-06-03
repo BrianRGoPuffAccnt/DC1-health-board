@@ -3098,6 +3098,88 @@ def summarize_daily_health_progress(progress: pd.DataFrame) -> dict[str, int | f
     }
 
 
+def next_window_info(progress: pd.DataFrame) -> dict:
+    """Return KPI dict for the nearest upcoming (or in-window) departure."""
+    if progress.empty or "_depart_dt" not in progress.columns:
+        return {"label": "Next Window", "value": "—", "delta": "No data", "accent": "neutral"}
+    now = pd.Timestamp(now_eastern())
+    upcoming = progress[
+        progress.get("Window Status", pd.Series(dtype=str)).isin(["Upcoming", "In Window"])
+        & progress["_depart_dt"].notna()
+        & progress["_depart_dt"].gt(now)
+    ].copy()
+    if upcoming.empty:
+        return {"label": "Next Window", "value": "—", "delta": "No upcoming windows", "accent": "neutral"}
+    nearest = upcoming.sort_values("_depart_dt").iloc[0]
+    delta_mins = (nearest["_depart_dt"] - now).total_seconds() / 60
+    hours = int(delta_mins // 60)
+    mins = int(delta_mins % 60)
+    time_str = (f"{hours}h {mins}m" if mins else f"{hours}h") if hours >= 1 else f"{mins}m"
+    carrier = str(nearest.get("Carrier", ""))
+    abbr = carrier.split()[-1][:6] if carrier.split() else "—"
+    accent = "red" if delta_mins < 60 else "yellow" if delta_mins < 180 else "neutral"
+    return {"label": "Next Window", "value": time_str, "delta": abbr, "accent": accent}
+
+
+def parse_daily_lines_remaining(ob_tracker: pd.DataFrame) -> tuple[int, int, int]:
+    """Parse Lines Remaining from today's OB tab rows.
+
+    Returns (numeric_lines, hv_count, drop_count).  Cells containing 'ON WATER'
+    or other in-transit markers are skipped — they represent off-floor inventory.
+    HV cells contribute to hv_count; DROP cells contribute to drop_count;
+    plain numbers go into numeric_lines.
+    """
+    if ob_tracker.empty:
+        return 0, 0, 0
+    today_rows = (
+        ob_tracker[ob_tracker["_ob_day_label"].eq("Today")]
+        if "_ob_day_label" in ob_tracker.columns
+        else ob_tracker
+    )
+    if today_rows.empty:
+        return 0, 0, 0
+    lines_col = first_matching_column(today_rows, [["lines", "remaining"], ["lines"]])
+    if not lines_col:
+        return 0, 0, 0
+    numeric_lines = 0
+    hv_count = 0
+    drop_count = 0
+    for val in today_rows[lines_col].dropna():
+        text = str(val).strip()
+        if not text or text.lower() in {"nan", "none", ""}:
+            continue
+        upper = text.upper()
+        if "WATER" in upper:
+            continue
+        if "HV" in upper:
+            m = re.match(r"(\d+)", text)
+            hv_count += int(m.group(1)) if m else 1
+            continue
+        if "DROP" in upper:
+            m = re.match(r"(\d+)", text)
+            drop_count += int(m.group(1)) if m else 1
+            continue
+        try:
+            numeric_lines += int(float(text))
+        except (ValueError, TypeError):
+            pass
+    return numeric_lines, hv_count, drop_count
+
+
+def format_daily_lines_tile(ob_tracker: pd.DataFrame) -> tuple[str, str, str]:
+    """Return (value, delta, accent) for the Daily Lines Remaining KPI tile."""
+    numeric, hv, drops = parse_daily_lines_remaining(ob_tracker)
+    parts = []
+    if hv:
+        parts.append(f"{hv} HV")
+    if drops:
+        parts.append(f"{drops} drops")
+    value = format_number(numeric)
+    delta = f"({', '.join(parts)})" if parts else "Lines on floor today"
+    accent = "yellow" if numeric > 0 else "green"
+    return value, delta, accent
+
+
 def top_daily_health_risks(progress: pd.DataFrame, limit: int = 3) -> pd.DataFrame:
     if progress.empty:
         return pd.DataFrame()
@@ -3743,6 +3825,8 @@ def render_live_update(context: DailyHealthContext) -> None:
         return
 
     summary = summarize_daily_health_progress(context.progress)
+    next_win = next_window_info(context.progress)
+    lines_value, lines_delta, lines_accent = format_daily_lines_tile(context.ob_tracker)
     render_enterprise_kpi_grid(
         [
             {"label": "Live Health", "value": str(summary["status"]), "delta": "SDT x OB x Fill Rate", "accent": str(summary["status"])},
@@ -3753,8 +3837,8 @@ def render_live_update(context: DailyHealthContext) -> None:
                 "accent": "green" if float(summary["completion"]) >= 0.9 else "yellow",
             },
             {"label": "Open TOs", "value": format_number(summary["open_tos"]), "delta": "Remaining carrier work", "accent": "yellow" if int(summary["open_tos"]) else "green"},
-            {"label": "In Window", "value": format_number(summary["in_window"]), "delta": f"{format_number(summary['past'])} past departure", "accent": "red" if int(summary["past"]) else "neutral"},
-            {"label": "Units NYP", "value": format_number(summary["units_nyp"]), "delta": "Pallet readiness", "accent": "yellow" if int(summary["units_nyp"]) else "green"},
+            {"label": next_win["label"], "value": next_win["value"], "delta": next_win["delta"], "accent": next_win["accent"]},
+            {"label": "Daily Lines", "value": lines_value, "delta": lines_delta, "accent": lines_accent},
             {"label": "PO W/O Pallets", "value": format_number(summary["po_without_pallets"]), "delta": "Fill-rate exception", "accent": "red" if int(summary["po_without_pallets"]) else "green"},
         ],
         columns=6,
