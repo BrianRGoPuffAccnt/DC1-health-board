@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -19,6 +20,14 @@ import streamlit.components.v1 as components
 
 
 APP_TITLE = "DC1 Supply Chain Health Board"
+_EASTERN = ZoneInfo("America/New_York")
+
+
+def now_eastern() -> datetime:
+    """Current wall-clock time in Eastern Time (auto EDT/EST), returned as a naive datetime."""
+    return datetime.now(_EASTERN).replace(tzinfo=None)
+
+
 DB_PATH = Path("data/dc1_health_board.sqlite")
 STYLE_PATH = Path("styles.css")
 LOGO_PATH = Path("assets/gopuff-logo.png")
@@ -675,11 +684,11 @@ def render_sidebar_brand() -> None:
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return now_eastern().isoformat(timespec="seconds")
 
 
 def local_today() -> datetime.date:
-    return datetime.now().date()
+    return now_eastern().date()
 
 
 def df_to_json(df: pd.DataFrame) -> str:
@@ -1280,7 +1289,7 @@ def classify_deadline(deadline_value: object) -> tuple[str, int | None]:
     deadline = pd.to_datetime(deadline_value, errors="coerce")
     if pd.isna(deadline):
         return "No Date", None
-    days_left = int((deadline.date() - datetime.now().date()).days)
+    days_left = int((deadline.date() - now_eastern().date()).days)
     if days_left < 0:
         return "Overdue", days_left
     if days_left <= 3:
@@ -1884,7 +1893,7 @@ def read_google_sheet_type_table(workbook_type: str, preferred_sheets: list[str]
 
 
 def previous_working_day(day: datetime | pd.Timestamp | None = None) -> pd.Timestamp:
-    current = pd.Timestamp(day or datetime.now()).normalize()
+    current = pd.Timestamp(day or now_eastern()).normalize()
     previous = current - pd.Timedelta(days=1)
     while previous.weekday() >= 5:
         previous -= pd.Timedelta(days=1)
@@ -1919,7 +1928,7 @@ def select_ob_tracker_sheet(sheet_names: list[str], day: datetime | pd.Timestamp
             continue
         month, day_num = parsed
         candidate = pd.Timestamp(year=target_day.year, month=month, day=day_num)
-        if candidate <= pd.Timestamp(datetime.now()).normalize():
+        if candidate <= pd.Timestamp(now_eastern()).normalize():
             dated.append((candidate, sheet))
     if dated:
         dated.sort(key=lambda item: item[0], reverse=True)
@@ -1940,7 +1949,7 @@ def select_ob_tracker_sheets(sheet_names: list[str], n: int = 3) -> list[tuple[p
     Position 3+ = completed prior days (loaded as context/dedup only).
     """
     clean_names = [sheet for sheet in sheet_names if str(sheet).strip()]
-    today = pd.Timestamp.now().normalize()
+    today = pd.Timestamp(now_eastern()).normalize()
 
     # Separate out Mix Label and get the working tabs to its left
     mix_label_idx = next(
@@ -1986,7 +1995,7 @@ def load_multi_tab_ob_tracker(
     tabs = select_ob_tracker_sheets(sheet_names, n)
     if not tabs:
         return pd.DataFrame(), [], previous_working_day(), "no dated tabs found"
-    today = pd.Timestamp.now().normalize()
+    today = pd.Timestamp(now_eastern()).normalize()
     yesterday = today - pd.Timedelta(days=1)
     frames: list[pd.DataFrame] = []
     for tab_date, tab_name in tabs:
@@ -2034,7 +2043,7 @@ def parse_time_today(value: object) -> pd.Timestamp | pd.NaT:
     parsed = pd.to_datetime(text, errors="coerce")
     if pd.isna(parsed):
         return pd.NaT
-    today = pd.Timestamp.now().normalize()
+    today = pd.Timestamp(now_eastern()).normalize()
     return today + pd.Timedelta(hours=parsed.hour, minutes=parsed.minute, seconds=parsed.second)
 
 
@@ -2042,7 +2051,7 @@ def add_window_status(progress: pd.DataFrame) -> pd.DataFrame:
     if progress.empty:
         return progress
     visual = progress.copy()
-    now = pd.Timestamp.now()
+    now = pd.Timestamp(now_eastern())
     visual["_ready_dt"] = visual["Load Ready Time"].map(parse_time_today) if "Load Ready Time" in visual.columns else pd.NaT
     visual["_depart_dt"] = visual["Departure Time"].map(parse_time_today) if "Departure Time" in visual.columns else pd.NaT
     visual["Window Status"] = "No SDT Window"
@@ -2457,7 +2466,7 @@ def build_schedule_progress(sdt: pd.DataFrame, tracker: pd.DataFrame) -> tuple[p
 
     schedule = sdt.copy()
     if sdt_day_col:
-        weekday_token = datetime.now().strftime("%a").casefold()
+        weekday_token = now_eastern().strftime("%a").casefold()
         schedule_day = schedule[sdt_day_col].astype(str).str.casefold()
         matched_day = schedule[schedule_day.str.contains(weekday_token, regex=False, na=False)]
         if not matched_day.empty:
@@ -2565,7 +2574,7 @@ def build_allocation_baseline() -> pd.DataFrame:
     work = work[work["_gusto"].str.len().gt(0) & ~work["_gusto"].str.casefold().isin({"nan", "none", ""})]
     if date_col:
         work["_ship_date"] = pd.to_datetime(work[date_col], errors="coerce")
-        cutoff = pd.Timestamp.now() - pd.Timedelta(days=7)
+        cutoff = pd.Timestamp(now_eastern()) - pd.Timedelta(days=7)
         recent = work[work["_ship_date"].isna() | work["_ship_date"].ge(cutoff)]
         if not recent.empty:
             work = recent
@@ -3482,7 +3491,7 @@ def make_executive_daily_brief(context: DailyHealthContext, health: HealthResult
         )
 
     return (
-        f"DC1 Executive Brief | {datetime.now().strftime('%m/%d/%Y %I:%M %p')}\n\n"
+        f"DC1 Executive Brief | {now_eastern().strftime('%m/%d/%Y %I:%M %p')}\n\n"
         f"Overall status: {health.label}\n\n"
         f"{shipping_line}\n\n"
         f"Pallet readiness: {format_number(summary.get('units_nyp', 0))} units NYP and "
@@ -3556,7 +3565,7 @@ def build_outstanding_site_readiness(context: DailyHealthContext) -> pd.DataFram
         + " - "
         + site_summary.get("Departure Time", pd.Series("", index=site_summary.index)).fillna("").astype(str)
     ).str.strip(" -")
-    now = pd.Timestamp.now()
+    now = pd.Timestamp(now_eastern())
     depart_times = site_summary.get("Departure Time", pd.Series("", index=site_summary.index)).map(parse_time_today)
     site_summary["Hours to SDT End"] = (depart_times - now).dt.total_seconds() / 3600
     site_summary["Hours Past SDT"] = ((now - depart_times).dt.total_seconds() / 3600).where(depart_times.notna(), pd.NA)
@@ -3725,7 +3734,7 @@ def render_live_update(context: DailyHealthContext) -> None:
         "DC1 Live Update",
         "Google Sites-ready pulse view for shipping-window progress, pallet readiness, and route-level risk.",
         status,
-        f"OB tab {context.ob_sheet or 'not selected'} | {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+        f"OB tab {context.ob_sheet or 'not selected'} | {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
     if context.progress.empty:
         st.info("Refresh or connect the SDT Schedule, OB TO Tracker, and Fill Rate sheets to populate the live update.")
@@ -3774,7 +3783,7 @@ def render_executive_briefs_view(context: DailyHealthContext, health: HealthResu
         "DC1 Shipping Readiness Brief",
         "Leadership summary designed for the Google Sites Executive Briefs space.",
         status,
-        f"Prepared {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+        f"Prepared {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
 
     if context.progress.empty:
@@ -3840,7 +3849,7 @@ def render_executive_summary_embed(context: DailyHealthContext, health: HealthRe
         "DC1 Shipping Readiness Summary",
         "Compact leadership-ready status block for the Executive Briefs page.",
         status,
-        f"Prepared {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+        f"Prepared {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
     if context.progress.empty:
         st.info("Executive summary is waiting on SDT Schedule and OB TO Tracker data.")
@@ -3882,7 +3891,7 @@ def render_executive_pallet_embed(context: DailyHealthContext) -> None:
         "Pallet Readiness",
         "Fill-rate and pallet exception view for routes not ready to load.",
         status,
-        f"Prepared {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+        f"Prepared {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
     if context.progress.empty:
         st.info("Pallet readiness is waiting on Fill Rate and OB Tracker data.")
@@ -3923,7 +3932,7 @@ def render_executive_note_embed(context: DailyHealthContext, health: HealthResul
         "Copy-Ready Briefing Note",
         "One-block leadership note for the Executive Briefs page.",
         str(summarize_daily_health_progress(context.progress)["status"]) if not context.progress.empty else health.label,
-        f"Prepared {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+        f"Prepared {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
     render_brief_panel("Copy-ready executive brief", make_executive_daily_brief(context, health, ops_data))
 
@@ -4393,7 +4402,7 @@ def seed_google_sheet_connections_from_secrets() -> list[str]:
 
 
 def scheduled_google_refresh_slot(now: datetime | None = None) -> tuple[str, datetime] | None:
-    current = now or datetime.now()
+    current = now or now_eastern()
     due_hours = [hour for hour in GOOGLE_REFRESH_SCHEDULE_HOURS if current.hour >= hour]
     if not due_hours:
         return None
@@ -4453,7 +4462,7 @@ def list_google_refresh_runs(limit: int = 10) -> pd.DataFrame:
 
 def scheduled_live_refresh_slot(now: datetime | None = None) -> tuple[str, datetime] | None:
     """Return the most recent live-refresh slot (hourly during operational hours)."""
-    current = now or datetime.now()
+    current = now or now_eastern()
     due_hours = [hour for hour in GOOGLE_LIVE_REFRESH_HOURS if current.hour >= hour]
     if not due_hours:
         return None
@@ -5182,7 +5191,7 @@ def dataframe_download_payload(df: pd.DataFrame, file_format: str, sheet_name: s
 
 def export_filename(prefix: str, file_format: str) -> str:
     extension = "xlsx" if file_format == "XLSX" else "csv"
-    return f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M')}.{extension}"
+    return f"{prefix}_{now_eastern().strftime('%Y%m%d_%H%M')}.{extension}"
 
 
 def classify_carrier_signal(message: str, selected_carrier: str, selected_channel: str) -> dict[str, str | int]:
@@ -6600,7 +6609,7 @@ def render_placard_builder(ship_allocation_records: pd.DataFrame) -> None:
             placard_export[col] = pd.to_datetime(placard_export[col], errors="coerce").dt.date.astype(str)
 
     action_cols = st.columns([1, 1, 2])
-    title_date = selected_dates[-1].strftime("%m-%d-%Y") if selected_dates else datetime.now().strftime("%m-%d-%Y")
+    title_date = selected_dates[-1].strftime("%m-%d-%Y") if selected_dates else now_eastern().strftime("%m-%d-%Y")
     print_html = build_placard_print_html(filtered, f"{title_date} Placards")
     action_cols[0].download_button(
         "Download Print-Ready Placards HTML",
@@ -6805,7 +6814,7 @@ def render_schedule_sync(ship_allocation_records: pd.DataFrame) -> None:
         for col in ["pick_date", "ship_date", "delivery_date"]:
             if col in allocations.columns:
                 allocations[col] = pd.to_datetime(allocations[col], errors="coerce")
-        today = pd.Timestamp.now(tz=None).normalize()
+        today = pd.Timestamp(now_eastern()).normalize()
         tomorrow = today + pd.Timedelta(days=1)
         priority = allocations[
             allocations.get("ship_date", pd.Series(index=allocations.index, dtype="datetime64[ns]")).dt.normalize().isin([today, tomorrow])
@@ -6862,7 +6871,7 @@ def render_outbound_to_control() -> None:
         work["planned_ship_dt"] = pd.to_datetime(work[ship_col], errors="coerce")
     else:
         work["planned_ship_dt"] = pd.NaT
-    today = pd.Timestamp.now(tz=None).normalize()
+    today = pd.Timestamp(now_eastern()).normalize()
     work["risk"] = "Normal"
     work.loc[work["planned_pick_dt"].notna() & work["planned_pick_dt"].dt.normalize().le(today + pd.Timedelta(days=1)) & work["lines_remaining_num"].gt(0), "risk"] = "Pick Risk"
     work.loc[work["planned_ship_dt"].notna() & work["planned_ship_dt"].dt.normalize().le(today + pd.Timedelta(days=1)) & work["lines_remaining_num"].gt(0), "risk"] = "Ship Risk"
@@ -7158,7 +7167,7 @@ def render_core_mark_view() -> None:
         work["delivery_dt"] = pd.to_datetime(work[delivery_col], errors="coerce")
     else:
         work["delivery_dt"] = pd.NaT
-    today = pd.Timestamp.now(tz=None).normalize()
+    today = pd.Timestamp(now_eastern()).normalize()
     complete_mask = work[status_col].astype(str).str.lower().str.contains("complete|delivered|closed") if status_col else pd.Series(False, index=work.index)
     exception_mask = (~complete_mask) & (
         work["pickup_dt"].isna()
@@ -8215,7 +8224,7 @@ def render_embed_transportation_control(context: DailyHealthContext) -> None:
         "DC1 Shipping Window Control",
         "Focused Google Sites module for SDT window, OB Tracker, and carrier progress signals.",
         status,
-        f"OB tab {context.ob_sheet or 'not selected'} | {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+        f"OB tab {context.ob_sheet or 'not selected'} | {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
     if context.progress.empty:
         st.info("Transportation Control is waiting on SDT Schedule and OB TO Tracker data.")
@@ -8481,7 +8490,7 @@ def render_database_backup() -> None:
     st.download_button(
         "Download SQLite Backup",
         data=DB_PATH.read_bytes(),
-        file_name=f"dc1_health_board_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.sqlite",
+        file_name=f"dc1_health_board_backup_{now_eastern().strftime('%Y%m%d_%H%M')}.sqlite",
         mime="application/octet-stream",
     )
 
@@ -9330,7 +9339,7 @@ def main() -> None:
 
             batch_name = st.text_input(
                 "Batch name",
-                value=f"Tender Batch {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                value=f"Tender Batch {now_eastern().strftime('%Y-%m-%d %H:%M')}",
             )
             if st.button("Save Tender Batch to SQLite"):
                 save_tender_batch(batch_name, tender_pipeline)
