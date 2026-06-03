@@ -3849,6 +3849,7 @@ def render_live_update(context: DailyHealthContext) -> None:
     summary = summarize_daily_health_progress(context.progress)
     next_win = next_window_info(context.progress)
     lines_value, lines_delta, lines_accent = format_daily_lines_tile(context.ob_tracker)
+    rollover_count = int(context.progress["Rollover"].sum()) if "Rollover" in context.progress.columns else 0
     render_enterprise_kpi_grid(
         [
             {"label": "Live Health", "value": str(summary["status"]), "delta": "SDT x OB x Fill Rate", "accent": str(summary["status"])},
@@ -3861,7 +3862,7 @@ def render_live_update(context: DailyHealthContext) -> None:
             {"label": "Open TOs", "value": format_number(summary["open_tos"]), "delta": "Remaining carrier work", "accent": "yellow" if int(summary["open_tos"]) else "green"},
             {"label": next_win["label"], "value": next_win["value"], "delta": next_win["delta"], "accent": next_win["accent"]},
             {"label": "Daily Lines", "value": lines_value, "delta": lines_delta, "accent": lines_accent},
-            {"label": "PO W/O Pallets", "value": format_number(summary["po_without_pallets"]), "delta": "Fill-rate exception", "accent": "red" if int(summary["po_without_pallets"]) else "green"},
+            {"label": "Rollover", "value": format_number(rollover_count), "delta": "Open GUSTOs from yesterday", "accent": "red" if rollover_count else "green"},
         ],
         columns=6,
     )
