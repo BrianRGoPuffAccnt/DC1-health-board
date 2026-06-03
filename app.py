@@ -3100,11 +3100,19 @@ def summarize_daily_health_progress(progress: pd.DataFrame) -> dict[str, int | f
 
 def next_window_info(progress: pd.DataFrame) -> dict:
     """Return KPI dict for the nearest upcoming (or in-window) departure."""
-    if progress.empty or "_depart_dt" not in progress.columns:
-        return {"label": "Next Window", "value": "—", "delta": "No data", "accent": "neutral"}
+    if progress.empty:
+        return {"label": "Next Window", "value": "—", "delta": "No routes loaded", "accent": "neutral"}
     now = pd.Timestamp(now_eastern())
+    # Build or rebuild _depart_dt if it's absent (e.g. stale cache after midnight)
+    if "_depart_dt" not in progress.columns:
+        if "Departure Time" in progress.columns:
+            progress = progress.copy()
+            progress["_depart_dt"] = progress["Departure Time"].map(parse_time_today)
+        else:
+            return {"label": "Next Window", "value": "—", "delta": "No SDT windows", "accent": "neutral"}
+    ws = progress.get("Window Status", pd.Series(dtype=str))
     upcoming = progress[
-        progress.get("Window Status", pd.Series(dtype=str)).isin(["Upcoming", "In Window"])
+        ws.isin(["Upcoming", "In Window"])
         & progress["_depart_dt"].notna()
         & progress["_depart_dt"].gt(now)
     ].copy()
@@ -3122,7 +3130,11 @@ def next_window_info(progress: pd.DataFrame) -> dict:
 
 
 def parse_daily_lines_remaining(ob_tracker: pd.DataFrame) -> tuple[int, int, int]:
-    """Parse Lines Remaining from today's OB tab rows.
+    """Parse Lines Remaining from the most recent OB tab.
+
+    Uses the tab with the highest _ob_tab_date so the metric stays populated
+    after midnight when the current working tab flips to 'Rollover' label but
+    no new day's tab has been created yet.
 
     Returns (numeric_lines, hv_count, drop_count).  Cells containing 'ON WATER'
     or other in-transit markers are skipped — they represent off-floor inventory.
@@ -3131,13 +3143,23 @@ def parse_daily_lines_remaining(ob_tracker: pd.DataFrame) -> tuple[int, int, int
     """
     if ob_tracker.empty:
         return 0, 0, 0
-    today_rows = (
-        ob_tracker[ob_tracker["_ob_day_label"].eq("Today")]
-        if "_ob_day_label" in ob_tracker.columns
-        else ob_tracker
-    )
-    if today_rows.empty:
+    # Always use the most recently dated tab — the active working tab regardless of label
+    if "_ob_tab_date" in ob_tracker.columns:
+        max_date = ob_tracker["_ob_tab_date"].max()
+        source_rows = ob_tracker[ob_tracker["_ob_tab_date"].eq(max_date)]
+    elif "_ob_day_label" in ob_tracker.columns:
+        for label in ("Today", "Rollover (Yesterday)"):
+            candidate = ob_tracker[ob_tracker["_ob_day_label"].eq(label)]
+            if not candidate.empty:
+                source_rows = candidate
+                break
+        else:
+            source_rows = ob_tracker
+    else:
+        source_rows = ob_tracker
+    if source_rows.empty:
         return 0, 0, 0
+    today_rows = source_rows
     lines_col = first_matching_column(today_rows, [["lines", "remaining"], ["lines"]])
     if not lines_col:
         return 0, 0, 0
