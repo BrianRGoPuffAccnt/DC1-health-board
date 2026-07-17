@@ -222,6 +222,8 @@ EMBED_TARGETS = {
     "executive_watchlist": "Executive Route Watchlist",
     "executive_pallets": "Executive Pallet Readiness",
     "executive_note": "Executive Copy-Ready Note",
+    "phl_ship_plan": "PHL Ships Plan",
+    "shipment_plan": "PHL Ships Plan",
     "market_profiles": "Market Profiles",
     "mfc_lookup": "MFC Lookup",
     "mfc_profiles": "MFC Profiles",
@@ -2174,7 +2176,112 @@ def build_phl_shipment_plan(phl_shipments: pd.DataFrame, ob_tracker: pd.DataFram
     loaded = plan["OB Status"].str.casefold().str.contains("loaded|complete|closed", regex=True, na=False)
     overdue = plan["Ship Date"].dt.normalize().le(pd.Timestamp(now_eastern()).normalize()) & ~loaded
     plan.loc[overdue & ~plan["OB Status"].eq("Missing in OB"), "Plan Match Status"] = "Late / At Risk"
+    plan["Plan Stage"] = plan["OB Status"].map(plan_stage_from_status)
     return plan.reset_index(drop=True)
+
+
+def plan_stage_from_status(status: object) -> str:
+    text = cell_text(status).casefold()
+    if not text or text == "missing in ob":
+        return "Missing in OB"
+    if "loaded" in text or "complete" in text or "closed" in text:
+        return "Loaded"
+    if "staged" in text:
+        return "Staged"
+    if "picking" in text:
+        return "Picking"
+    if "allocated" in text:
+        return "Allocated"
+    return "Other"
+
+
+def build_fill_rate_detail(fill_rate: pd.DataFrame) -> pd.DataFrame:
+    if fill_rate.empty:
+        return pd.DataFrame()
+    to_col = first_matching_column(fill_rate, [["po", "number"], ["to", "number"], ["to"]])
+    carrier_col = first_matching_column(fill_rate, [["carrier"], ["route"]])
+    location_col = first_matching_column(fill_rate, [["location", "name"], ["location"]])
+    dock_col = first_matching_column(fill_rate, [["dock", "door"], ["door"]])
+    units_nyp_col = first_matching_column(fill_rate, [["units", "nyp"]])
+    picked_col = first_matching_column(fill_rate, [["lbi", "pick"], ["pick", "quantity"], ["picked", "units"]])
+    pallet_col = first_matching_column(fill_rate, [["total", "pallets"], ["pallets"]])
+    po_without_pallets_col = first_matching_column(fill_rate, [["po", "w", "o", "pallets"], ["water", "pallets"], ["without", "pallets"]])
+    weight_col = first_matching_column(fill_rate, [["total", "pallet", "weight"], ["weight"]])
+    if not to_col:
+        return pd.DataFrame()
+    work = fill_rate.copy()
+    result = pd.DataFrame(index=work.index)
+    result["TO Number"] = work[to_col].map(cell_text)
+    result["_to_key"] = result["TO Number"].str.upper().str.strip()
+    result["Fill Carrier"] = work[carrier_col].map(cell_text) if carrier_col else ""
+    result["Fill Location"] = work[location_col].map(cell_text) if location_col else ""
+    result["Dock Door"] = work[dock_col].map(cell_text) if dock_col else ""
+    result["Units_NYP"] = pd.to_numeric(work[units_nyp_col], errors="coerce").fillna(0) if units_nyp_col else 0
+    result["Picked_Units"] = pd.to_numeric(work[picked_col], errors="coerce").fillna(0) if picked_col else 0
+    result["Fill_Total_Pallets"] = pd.to_numeric(work[pallet_col], errors="coerce").fillna(0) if pallet_col else 0
+    result["PO_WO_Pallets"] = pd.to_numeric(work[po_without_pallets_col], errors="coerce").fillna(0) if po_without_pallets_col else 0
+    result["Fill_Total_Weight"] = pd.to_numeric(work[weight_col], errors="coerce").fillna(0) if weight_col else 0
+    result = result[result["_to_key"].str.len().gt(0) & ~result["_to_key"].str.casefold().isin({"nan", "none"})]
+    if result.empty:
+        return result
+    return (
+        result.groupby("_to_key", dropna=False)
+        .agg(
+            Fill_Carrier=("Fill Carrier", "first"),
+            Fill_Location=("Fill Location", "first"),
+            Dock_Door=("Dock Door", "first"),
+            Units_NYP=("Units_NYP", "sum"),
+            Picked_Units=("Picked_Units", "sum"),
+            Fill_Total_Pallets=("Fill_Total_Pallets", "sum"),
+            PO_WO_Pallets=("PO_WO_Pallets", "sum"),
+            Fill_Total_Weight=("Fill_Total_Weight", "sum"),
+        )
+        .reset_index()
+    )
+
+
+def merge_shipment_plan_readiness(shipment_plan: pd.DataFrame, fill_rate: pd.DataFrame) -> pd.DataFrame:
+    if shipment_plan.empty:
+        return shipment_plan
+    plan = shipment_plan.copy()
+    if "Plan Stage" not in plan.columns:
+        plan["Plan Stage"] = plan.get("OB Status", pd.Series("", index=plan.index)).map(plan_stage_from_status)
+    detail = build_fill_rate_detail(fill_rate)
+    if not detail.empty:
+        plan = plan.merge(detail, on="_to_key", how="left")
+    for col in ["Units_NYP", "Picked_Units", "Fill_Total_Pallets", "PO_WO_Pallets", "Fill_Total_Weight"]:
+        if col not in plan.columns:
+            plan[col] = 0
+        plan[col] = pd.to_numeric(plan[col], errors="coerce").fillna(0)
+    for col in ["Fill_Carrier", "Fill_Location", "Dock_Door"]:
+        if col not in plan.columns:
+            plan[col] = ""
+        plan[col] = plan[col].fillna("").astype(str)
+    plan["Total_Work_Units"] = plan["Picked_Units"] + plan["Units_NYP"]
+    plan["Pick_Completion"] = plan["Picked_Units"] / plan["Total_Work_Units"].replace(0, pd.NA)
+    plan["Pick_Completion"] = plan["Pick_Completion"].fillna(0)
+
+    pallet_summary = summarize_gusto_pallet_progress(load_all_daily_pallet_counts())
+    if not pallet_summary.empty:
+        plan = plan.merge(pallet_summary, left_on="TO Number", right_on="Gusto", how="left")
+    for col in ["Pallet_Total", "Pallets_Complete", "Pallet_Weight"]:
+        if col not in plan.columns:
+            plan[col] = 0
+        plan[col] = pd.to_numeric(plan[col], errors="coerce").fillna(0)
+    plan["Pallet_Completion"] = plan["Pallets_Complete"] / plan["Pallet_Total"].replace(0, pd.NA)
+    plan["Pallet_Completion"] = plan["Pallet_Completion"].fillna(0)
+    return plan
+
+
+def classify_overflow(row: pd.Series) -> str:
+    pallets = numeric_value(row.get("Total Pallet Estimate"))
+    weight = numeric_value(row.get("Total Weight"))
+    adhoc = cell_text(row.get("Adhoc")).casefold()
+    if "overflow" in adhoc or pallets > 30 or weight > 45000:
+        return "Overflow"
+    if "capacity" in adhoc or pallets >= 28 or weight >= 42000:
+        return "At Capacity"
+    return "Normal"
 
 
 def merge_phl_plan_progress(progress: pd.DataFrame, shipment_plan: pd.DataFrame, phl_totals: pd.DataFrame) -> pd.DataFrame:
@@ -2203,9 +2310,11 @@ def merge_phl_plan_progress(progress: pd.DataFrame, shipment_plan: pd.DataFrame,
         .rename(columns={"Carrier": "PHL Carrier"})
     )
     if not phl_totals.empty:
-        totals = phl_totals.sort_values("_source_tab_date").drop_duplicates("_route_key", keep="last")
+        totals = phl_totals.copy()
+        totals["Overflow Status"] = totals.apply(classify_overflow, axis=1)
+        totals = totals.sort_values("_source_tab_date").drop_duplicates("_route_key", keep="last")
         agg = agg.merge(
-            totals[["_route_key", "Total Pallet Estimate", "Adhoc"]],
+            totals[["_route_key", "Total Pallet Estimate", "Adhoc", "Overflow Status"]],
             on="_route_key",
             how="left",
         )
@@ -2218,6 +2327,8 @@ def merge_phl_plan_progress(progress: pd.DataFrame, shipment_plan: pd.DataFrame,
             merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0)
     if "Adhoc" in merged.columns:
         merged["Adhoc"] = merged["Adhoc"].fillna("")
+    if "Overflow Status" in merged.columns:
+        merged["Overflow Status"] = merged["Overflow Status"].fillna("Normal")
     return merged
 
 
@@ -2730,6 +2841,7 @@ def load_daily_health_context() -> DailyHealthContext:
     phl_google, phl_shipments, phl_totals, phl_sdt, phl_sheets = load_phl_ships_context()
     phl_source = str(phl_google["name"]) if phl_google is not None else ""
     shipment_plan = build_phl_shipment_plan(phl_shipments, ob_tracker)
+    shipment_plan = merge_shipment_plan_readiness(shipment_plan, fill_rate)
 
     progress = pd.DataFrame()
     matched_columns: dict[str, str] = {}
@@ -3221,11 +3333,11 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
     dock_summary = summarize_fill_rate_dock_activity(context.fill_rate)
     readiness = build_fill_rate_readiness(context.fill_rate)
 
-    if pallets.empty and context.fill_rate.empty:
+    if pallets.empty and context.fill_rate.empty and context.shipment_plan.empty:
         render_enterprise_module_header(
             "Daily Health Operations",
             "Ops & Labor Pulse",
-            "Connect the Operations Fill-Rate Google Sheet to populate pallet readiness, dock pressure, and workload focus.",
+            "Connect PHL Ships and Operations Fill-Rate to populate pick readiness, pallet status, dock pressure, and workload focus.",
             "Yellow",
             "No fill-rate data loaded",
         )
@@ -3236,13 +3348,13 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
     completed_pallets = int(pallets["Complete"].sum()) if not pallets.empty else 0
     open_pallets = max(total_pallets - completed_pallets, 0)
     completion_rate = completed_pallets / total_pallets if total_pallets else 0
-    active_gustos = int(pallets["Gusto"].nunique()) if not pallets.empty else int(readiness.get("Fill_POs", pd.Series(dtype=float)).sum())
+    active_gustos = int(context.shipment_plan["TO Number"].nunique()) if not context.shipment_plan.empty else int(pallets["Gusto"].nunique()) if not pallets.empty else int(readiness.get("Fill_POs", pd.Series(dtype=float)).sum())
     active_mfcs = int(pallets["Location Name"].nunique()) if not pallets.empty else int(readiness.get("Fill_Locations", pd.Series(dtype=float)).sum())
     crossdock_count = int(pallets["Cross-Dock"].nunique()) if not pallets.empty else int(readiness["Fill Carrier"].nunique()) if not readiness.empty else 0
     total_weight = float(pallets["Pallet Weight"].sum()) if not pallets.empty else float(readiness.get("Total_Pallet_Weight", pd.Series(dtype=float)).sum())
-    units_nyp = int(readiness.get("Units_NYP", pd.Series(dtype=float)).sum()) if not readiness.empty else 0
-    po_without_pallets = int(readiness.get("PO_WO_Pallets", pd.Series(dtype=float)).sum()) if not readiness.empty else 0
-    picked_units = int(readiness.get("LBI_Pick_Quantity", pd.Series(dtype=float)).sum()) if not readiness.empty else 0
+    units_nyp = int(context.shipment_plan.get("Units_NYP", pd.Series(dtype=float)).sum()) if not context.shipment_plan.empty else int(readiness.get("Units_NYP", pd.Series(dtype=float)).sum()) if not readiness.empty else 0
+    po_without_pallets = int(context.shipment_plan.get("PO_WO_Pallets", pd.Series(dtype=float)).sum()) if not context.shipment_plan.empty else int(readiness.get("PO_WO_Pallets", pd.Series(dtype=float)).sum()) if not readiness.empty else 0
+    picked_units = int(context.shipment_plan.get("Picked_Units", pd.Series(dtype=float)).sum()) if not context.shipment_plan.empty else int(readiness.get("LBI_Pick_Quantity", pd.Series(dtype=float)).sum()) if not readiness.empty else 0
     total_work_units = picked_units + units_nyp
     work_completion = picked_units / total_work_units if total_work_units else completion_rate
 
@@ -3263,7 +3375,7 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
     render_enterprise_module_header(
         "Daily Health Operations",
         "Ops & Labor Pulse",
-        "Operations Fill-Rate view for pallet readiness, dock pressure, and labor workload focus.",
+        "PHL Ships and Fill-Rate view for picked units vs NYP, GUSTO workload, pallet readiness, and dock pressure.",
         status,
         " | ".join(source_bits) if source_bits else "Operations Fill-Rate source",
     )
@@ -3271,16 +3383,16 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
     render_enterprise_kpi_grid(
         [
             {
+                "label": "Pick Completion",
+                "value": format_percent(work_completion),
+                "delta": f"{format_number(picked_units)} picked / {format_number(units_nyp)} NYP",
+                "accent": "green" if work_completion >= 0.9 else "yellow" if work_completion >= 0.5 else "red",
+            },
+            {
                 "label": "Pallet Completion",
                 "value": format_percent(completion_rate),
                 "delta": f"{format_number(completed_pallets)} of {format_number(total_pallets)} staged",
                 "accent": "green" if completion_rate >= 0.9 else "yellow" if completion_rate >= 0.5 else "red",
-            },
-            {
-                "label": "Open Pallets",
-                "value": format_number(open_pallets),
-                "delta": "remaining prep / staging work",
-                "accent": "green" if open_pallets == 0 else "yellow",
             },
             {
                 "label": "Active GUSTOs",
@@ -3303,6 +3415,43 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
         ],
         columns=5,
     )
+
+    lane_plan = plan_lane_readiness(context.shipment_plan)
+    if not lane_plan.empty:
+        st.markdown("#### Pick Readiness by Shipping Lane")
+        lane_cols = st.columns([1.05, 0.95])
+        with lane_cols[0]:
+            lane_chart = lane_plan.sort_values("Units_NYP", ascending=True)
+            fig_lane = px.bar(
+                lane_chart,
+                x=["Picked_Units", "Units_NYP"],
+                y="Carrier",
+                orientation="h",
+                labels={"value": "Units", "Carrier": "", "variable": "Work Type"},
+                color_discrete_map={"Picked_Units": "#2e7d32", "Units_NYP": "#f9a825"},
+            )
+            fig_lane.update_layout(height=max(320, 34 * len(lane_chart)), margin=dict(l=10, r=30, t=10, b=10))
+            st.plotly_chart(fig_lane, use_container_width=True)
+        with lane_cols[1]:
+            gusto_cols = [
+                "Carrier",
+                "TO Number",
+                "goPuff Site Location",
+                "Picked_Units",
+                "Units_NYP",
+                "Pick_Completion",
+                "Plan Stage",
+            ]
+            gusto_focus = context.shipment_plan[[col for col in gusto_cols if col in context.shipment_plan.columns]].copy()
+            gusto_focus = gusto_focus.sort_values(["Units_NYP", "Picked_Units"], ascending=[False, True]).head(12)
+            st.dataframe(
+                gusto_focus,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Pick_Completion": st.column_config.ProgressColumn("Pick Completion", format="%.0f%%", min_value=0, max_value=1)
+                },
+            )
 
     if not crossdock_summary.empty:
         chart_cols = st.columns([1.1, 0.9])
@@ -3877,8 +4026,21 @@ def render_brief_panel(title: str, body: str) -> None:
 
 
 def make_live_update_note(context: DailyHealthContext) -> str:
-    if context.progress.empty:
-        return "Daily Health live update is waiting on SDT Schedule, OB TO Tracker, and Fill Rate sources."
+    if context.progress.empty and context.shipment_plan.empty:
+        return "Daily Health live update is waiting on PHL Ships, SDT Schedule, OB TO Tracker, and Fill Rate sources."
+    if not context.shipment_plan.empty:
+        plan_summary = summarize_phl_shipment_plan(context.shipment_plan)
+        stages = stage_counts(context.shipment_plan)
+        overflows = overflow_summary(context.phl_totals)
+        overflow_count = int(overflows["Overflow Status"].eq("Overflow").sum()) if not overflows.empty else 0
+        units_nyp = int(pd.to_numeric(context.shipment_plan.get("Units_NYP", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+        return (
+            f"DC1 live update: {format_number(plan_summary['loaded'])} of {format_number(plan_summary['planned_tos'])} planned TOs loaded "
+            f"({format_percent(plan_summary['completion'])}). OB stage mix: {format_number(stages['Allocated'])} allocated, "
+            f"{format_number(stages['Picking'])} picking, {format_number(stages['Staged'])} staged, {format_number(stages['Loaded'])} loaded. "
+            f"{format_number(plan_summary['missing'])} missing in OB, {format_number(plan_summary['mismatch'])} date mismatch, "
+            f"{format_number(units_nyp)} units NYP, and {format_number(overflow_count)} overflow lane(s)."
+        )
     summary = summarize_daily_health_progress(context.progress)
     risk_carriers = top_daily_health_risks(context.progress, 3)
     risk_line = "No top carrier risks currently surfaced."
@@ -3899,9 +4061,29 @@ def make_live_update_note(context: DailyHealthContext) -> str:
 def make_executive_daily_brief(context: DailyHealthContext, health: HealthResult, ops_data: dict[str, pd.DataFrame]) -> str:
     ops_summary = summarize_ops_overall(ops_data)
     summary = summarize_daily_health_progress(context.progress) if not context.progress.empty else {}
-    if context.progress.empty:
-        shipping_line = "Shipping readiness is waiting on the live SDT Schedule and OB TO Tracker match."
-        action_line = "Connect or refresh the three Daily Health sources before publishing the executive note."
+    plan_summary = summarize_phl_shipment_plan(context.shipment_plan)
+    overflows = overflow_summary(context.phl_totals)
+    overflow_count = int(overflows["Overflow Status"].eq("Overflow").sum()) if not overflows.empty else 0
+    capacity_count = int(overflows["Overflow Status"].eq("At Capacity").sum()) if not overflows.empty else 0
+    units_nyp = int(pd.to_numeric(context.shipment_plan.get("Units_NYP", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not context.shipment_plan.empty else int(summary.get("units_nyp", 0) or 0)
+    if context.progress.empty and context.shipment_plan.empty:
+        shipping_line = "Shipping readiness is waiting on PHL Ships, SDT Schedule, OB TO Tracker, and Fill Rate matches."
+        action_line = "Connect or refresh the Daily Health source sheets before publishing the executive note."
+    elif not context.shipment_plan.empty:
+        lane_watch = plan_lane_readiness(context.shipment_plan)
+        watch_line = "no surfaced route-level risks"
+        if not lane_watch.empty:
+            lane_watch = lane_watch.sort_values(["Missing_in_OB", "Units_NYP", "Planned_Pallets"], ascending=[False, False, False]).head(3)
+            watch_line = "; ".join(str(carrier) for carrier in lane_watch["Carrier"].tolist())
+        shipping_line = (
+            f"Shipping readiness is {health.label}: {format_percent(plan_summary['completion'])} of the PHL Ships plan loaded, "
+            f"{format_number(plan_summary['open'])} planned TOs still open, {format_number(plan_summary['missing'])} missing in OB, "
+            f"{format_number(plan_summary['mismatch'])} date mismatch, and {format_number(overflow_count)} overflow lane(s). "
+            f"Current watch list: {watch_line}."
+        )
+        action_line = (
+            "Confirm ownership for missing/date-mismatch TOs, recover NYP work by lane, and resolve linehaul overflow or capacity exceptions."
+        )
     else:
         risks = top_daily_health_risks(context.progress, 3)
         risk_line = "no surfaced route-level risks"
@@ -3926,8 +4108,8 @@ def make_executive_daily_brief(context: DailyHealthContext, health: HealthResult
         f"DC1 Executive Brief | {now_eastern().strftime('%m/%d/%Y %I:%M %p')}\n\n"
         f"Overall status: {health.label}\n\n"
         f"{shipping_line}\n\n"
-        f"Pallet readiness: {format_number(summary.get('units_nyp', 0))} units NYP and "
-        f"{format_number(summary.get('po_without_pallets', 0))} PO/pallet readiness exception(s).\n\n"
+        f"Pallet and pick readiness: {format_number(units_nyp)} units NYP; "
+        f"{format_number(capacity_count)} lane(s) at capacity and {format_number(overflow_count)} lane(s) in overflow.\n\n"
         f"{ops_line}\n\n"
         f"Recommended action: {action_line}"
     )
@@ -4161,38 +4343,56 @@ def render_live_update(context: DailyHealthContext) -> None:
     status = "Waiting"
     if not context.progress.empty:
         status = str(summarize_daily_health_progress(context.progress)["status"])
+    if not context.shipment_plan.empty:
+        plan_summary = summarize_phl_shipment_plan(context.shipment_plan)
+        if int(plan_summary["missing"]) or int(plan_summary["late"]):
+            status = "Red"
+        elif int(plan_summary["mismatch"]) or int(context.shipment_plan.get("Units_NYP", pd.Series(dtype=float)).sum()):
+            status = "Yellow"
     render_enterprise_module_header(
         "Home Page Live Operations",
         "DC1 Live Update",
-        "Google Sites-ready pulse view for shipping-window progress, pallet readiness, and route-level risk.",
+        "Google Sites-ready pulse view for PHL Ships plan, OB execution stage, Fill Rate readiness, and route-level risk.",
         status,
-        f"OB tab {context.ob_sheet or 'not selected'} | {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
+        f"PHL Ships + OB + Fill Rate | {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
-    if context.progress.empty:
-        st.info("Refresh or connect the SDT Schedule, OB TO Tracker, and Fill Rate sheets to populate the live update.")
+    if context.progress.empty and context.shipment_plan.empty:
+        st.info("Refresh or connect PHL Ships, SDT Schedule, OB TO Tracker, and Fill Rate sheets to populate the live update.")
         if context.matched_columns:
             st.json(context.matched_columns)
         return
 
-    summary = summarize_daily_health_progress(context.progress)
+    summary = summarize_daily_health_progress(context.progress) if not context.progress.empty else {
+        "status": status,
+        "loaded": 0,
+        "total_tos": 0,
+        "completion": 0,
+        "open_tos": 0,
+    }
+    plan_summary = summarize_phl_shipment_plan(context.shipment_plan)
+    stages = stage_counts(context.shipment_plan)
     next_win = next_window_info(context.progress)
     lines_value, lines_delta, lines_accent = format_daily_lines_tile(context.ob_tracker)
     rollover_count = int(context.progress["Rollover"].sum()) if "Rollover" in context.progress.columns else 0
+    units_nyp = int(pd.to_numeric(context.shipment_plan.get("Units_NYP", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not context.shipment_plan.empty else int(summary.get("units_nyp", 0))
+    overflows = overflow_summary(context.phl_totals)
+    overflow_count = int(overflows["Overflow Status"].eq("Overflow").sum()) if not overflows.empty else 0
     render_enterprise_kpi_grid(
         [
-            {"label": "Live Health", "value": str(summary["status"]), "delta": "SDT x OB x Fill Rate", "accent": str(summary["status"])},
+            {"label": "Live Health", "value": status, "delta": "PHL x OB x Fill Rate", "accent": status},
             {
-                "label": "TO Progress",
-                "value": f"{format_number(summary['loaded'])} / {format_number(summary['total_tos'])}",
-                "delta": format_percent(summary["completion"]),
-                "accent": "green" if float(summary["completion"]) >= 0.9 else "yellow",
+                "label": "Plan Loaded",
+                "value": f"{format_number(plan_summary['loaded'])} / {format_number(plan_summary['planned_tos'])}",
+                "delta": format_percent(plan_summary["completion"]),
+                "accent": "green" if float(plan_summary["completion"]) >= 0.9 else "yellow",
             },
-            {"label": "Open TOs", "value": format_number(summary["open_tos"]), "delta": "Remaining carrier work", "accent": "yellow" if int(summary["open_tos"]) else "green"},
+            {"label": "Staged / Picking", "value": f"{format_number(stages['Staged'])} / {format_number(stages['Picking'])}", "delta": "OB execution stage", "accent": "yellow" if stages["Picking"] else "green"},
+            {"label": "Missing / Mismatch", "value": f"{format_number(plan_summary['missing'])} / {format_number(plan_summary['mismatch'])}", "delta": "PHL vs OB sync", "accent": "red" if int(plan_summary["missing"]) else "yellow" if int(plan_summary["mismatch"]) else "green"},
             {"label": next_win["label"], "value": next_win["value"], "delta": next_win["delta"], "accent": next_win["accent"]},
-            {"label": "Daily Lines", "value": lines_value, "delta": lines_delta, "accent": lines_accent},
-            {"label": "Rollover", "value": format_number(rollover_count), "delta": "Open GUSTOs from yesterday", "accent": "red" if rollover_count else "green"},
+            {"label": "Units NYP", "value": format_number(units_nyp), "delta": "Fill Rate readiness", "accent": "yellow" if units_nyp else "green"},
+            {"label": "Overflow Lanes", "value": format_number(overflow_count), "delta": ">30 pallets or >45k lbs", "accent": "red" if overflow_count else "green"},
         ],
-        columns=6,
+        columns=7,
     )
 
     risk_cols = st.columns([1.2, 1])
@@ -4202,8 +4402,9 @@ def render_live_update(context: DailyHealthContext) -> None:
         render_enterprise_risk_cards(risks)
         render_open_tos_drilldown(context)
     with risk_cols[1]:
-        st.markdown('<div class="gp-section-label">Departure Schedule</div>', unsafe_allow_html=True)
-        render_departure_schedule(context.progress)
+        st.markdown('<div class="gp-section-label">Allocated / Picking / Staged / Loaded</div>', unsafe_allow_html=True)
+        render_plan_stage_breakdown(context.shipment_plan)
+        st.caption(f"Daily lines: {lines_value} {lines_delta} | Rollover: {format_number(rollover_count)}")
 
     render_brief_panel("Copy-ready live briefing feed", make_live_update_note(context))
 
@@ -4213,61 +4414,73 @@ def render_executive_briefs_view(context: DailyHealthContext, health: HealthResu
     status = health.label
     if not context.progress.empty:
         status = str(summarize_daily_health_progress(context.progress)["status"])
+    if not context.shipment_plan.empty:
+        plan_summary = summarize_phl_shipment_plan(context.shipment_plan)
+        if int(plan_summary["missing"]) or int(plan_summary["late"]):
+            status = "Red"
+        elif int(plan_summary["mismatch"]):
+            status = "Yellow"
     render_enterprise_module_header(
         "Executive Briefing Center",
         "DC1 Shipping Readiness Brief",
-        "Leadership summary designed for the Google Sites Executive Briefs space.",
+        "Leadership summary of PHL Ships plan, OB execution, Fill Rate readiness, and overflow exposure.",
         status,
         f"Prepared {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
 
-    if context.progress.empty:
-        st.info("Daily Executive Summary will populate after SDT Schedule and OB TO Tracker are connected or refreshed.")
+    if context.progress.empty and context.shipment_plan.empty:
+        st.info("Daily Executive Summary will populate after PHL Ships, SDT Schedule, OB TO Tracker, and Fill Rate are connected or refreshed.")
     else:
-        summary = summarize_daily_health_progress(context.progress)
+        summary = summarize_daily_health_progress(context.progress) if not context.progress.empty else {
+            "status": status,
+            "completion": 0,
+            "loaded": 0,
+            "open_tos": 0,
+            "units_nyp": 0,
+            "po_without_pallets": 0,
+        }
+        plan_summary = summarize_phl_shipment_plan(context.shipment_plan)
+        overflows = overflow_summary(context.phl_totals)
+        overflow_count = int(overflows["Overflow Status"].eq("Overflow").sum()) if not overflows.empty else 0
+        units_nyp = int(pd.to_numeric(context.shipment_plan.get("Units_NYP", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not context.shipment_plan.empty else int(summary["units_nyp"])
         render_enterprise_kpi_grid(
             [
-                {"label": "Shipping Health", "value": str(summary["status"]), "delta": "Executive status", "accent": str(summary["status"])},
-                {"label": "Loaded", "value": format_percent(summary["completion"]), "delta": f"{format_number(summary['loaded'])} loaded TOs", "accent": "green" if float(summary["completion"]) >= 0.9 else "yellow"},
-                {"label": "Open TOs", "value": format_number(summary["open_tos"]), "delta": "Carrier load progress", "accent": "yellow" if int(summary["open_tos"]) else "green"},
-                {"label": "Pallet Exceptions", "value": format_number(int(summary["units_nyp"]) + int(summary["po_without_pallets"])), "delta": "Fill-rate readiness", "accent": "red" if int(summary["po_without_pallets"]) else "yellow" if int(summary["units_nyp"]) else "green"},
+                {"label": "Shipping Health", "value": status, "delta": "Executive status", "accent": status},
+                {"label": "Plan Loaded", "value": format_percent(plan_summary["completion"]), "delta": f"{format_number(plan_summary['loaded'])} loaded TOs", "accent": "green" if float(plan_summary["completion"]) >= 0.9 else "yellow"},
+                {"label": "Open Planned TOs", "value": format_number(plan_summary["open"]), "delta": "PHL Ships baseline", "accent": "yellow" if int(plan_summary["open"]) else "green"},
+                {"label": "Missing / Mismatch", "value": f"{format_number(plan_summary['missing'])} / {format_number(plan_summary['mismatch'])}", "delta": "PHL vs OB", "accent": "red" if int(plan_summary["missing"]) else "yellow" if int(plan_summary["mismatch"]) else "green"},
+                {"label": "Units NYP", "value": format_number(units_nyp), "delta": "Pick readiness", "accent": "yellow" if units_nyp else "green"},
+                {"label": "Overflow Lanes", "value": format_number(overflow_count), "delta": ">30 pallets or >45k lbs", "accent": "red" if overflow_count else "green"},
             ],
-            columns=4,
+            columns=6,
         )
 
         render_outstanding_site_blocks(context)
 
         chart_cols = st.columns([1, 1])
         with chart_cols[0]:
-            readiness_cols = [col for col in ["Carrier", "Progress %", "Open TOs", "Timing Risk", "Pallet Readiness Risk"] if col in context.progress.columns]
+            readiness_cols = [col for col in ["Carrier", "Planned_TOs", "Plan_Loaded", "Plan_Open", "Missing_in_OB", "Date_Mismatches", "Late_TOs", "Overflow Status"] if col in context.progress.columns]
             st.markdown('<div class="gp-section-label">On-Time Shipping Readiness</div>', unsafe_allow_html=True)
-            readiness_display = context.progress[readiness_cols]
-            if "Open TOs" in readiness_display.columns:
+            readiness_display = context.progress[readiness_cols] if readiness_cols else plan_lane_readiness(context.shipment_plan)
+            if "Plan_Open" in readiness_display.columns:
+                readiness_display = readiness_display.sort_values("Plan_Open", ascending=False)
+            elif "Open TOs" in readiness_display.columns:
                 readiness_display = readiness_display.sort_values("Open TOs", ascending=False)
             readiness_display = readiness_display.head(12)
-            if "Progress %" in readiness_cols:
+            st.dataframe(readiness_display, use_container_width=True, hide_index=True)
+        with chart_cols[1]:
+            st.markdown('<div class="gp-section-label">Pick & Overflow Readiness</div>', unsafe_allow_html=True)
+            lane_display = plan_lane_readiness(context.shipment_plan)
+            if not lane_display.empty:
+                lane_display = lane_display.sort_values(["Units_NYP", "Planned_Pallets"], ascending=False)
+                show_cols = ["Carrier", "Picked_Units", "Units_NYP", "Picked %", "Planned_Pallets", "Missing_in_OB"]
                 st.dataframe(
-                    readiness_display,
+                    lane_display[[col for col in show_cols if col in lane_display.columns]].head(12),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "Progress %": st.column_config.ProgressColumn("Progress %", format="%.0f%%", min_value=0, max_value=1)
+                        "Picked %": st.column_config.ProgressColumn("Picked %", format="%.0f%%", min_value=0, max_value=1)
                     },
-                )
-            else:
-                st.dataframe(readiness_display, use_container_width=True, hide_index=True)
-        with chart_cols[1]:
-            st.markdown('<div class="gp-section-label">Pallet & Fill Rate Readiness</div>', unsafe_allow_html=True)
-            pallet_cols = [col for col in ["Carrier", "Units_NYP", "PO_WO_Pallets", "Avg_Fill_Rate", "Pallet Readiness Risk"] if col in context.progress.columns]
-            if pallet_cols:
-                sort_cols = [col for col in ["Units_NYP", "PO_WO_Pallets"] if col in pallet_cols]
-                pallet_display = context.progress[pallet_cols]
-                if sort_cols:
-                    pallet_display = pallet_display.sort_values(sort_cols, ascending=False)
-                st.dataframe(
-                    pallet_display.head(12),
-                    use_container_width=True,
-                    hide_index=True,
                 )
             else:
                 st.caption("Fill Rate source is not matched yet.")
@@ -4374,7 +4587,12 @@ def summarize_phl_shipment_plan(plan: pd.DataFrame) -> dict[str, int | float]:
             "late": 0,
             "completion": 0,
         }
-    loaded = plan["OB Status"].astype(str).str.casefold().str.contains("loaded|complete|closed", regex=True, na=False)
+    if "OB Status" in plan.columns:
+        loaded = plan["OB Status"].astype(str).str.casefold().str.contains("loaded|complete|closed", regex=True, na=False)
+    elif "Plan Stage" in plan.columns:
+        loaded = plan["Plan Stage"].eq("Loaded")
+    else:
+        loaded = pd.Series(False, index=plan.index)
     planned_tos = int(plan["TO Number"].nunique()) if "TO Number" in plan.columns else len(plan)
     loaded_count = int(loaded.sum())
     return {
@@ -4390,6 +4608,95 @@ def summarize_phl_shipment_plan(plan: pd.DataFrame) -> dict[str, int | float]:
     }
 
 
+def stage_counts(plan: pd.DataFrame) -> dict[str, int]:
+    stages = ["Allocated", "Picking", "Staged", "Loaded", "Missing in OB", "Other"]
+    if plan.empty or "Plan Stage" not in plan.columns:
+        return {stage: 0 for stage in stages}
+    counts = plan["Plan Stage"].value_counts().to_dict()
+    return {stage: int(counts.get(stage, 0)) for stage in stages}
+
+
+def overflow_summary(phl_totals: pd.DataFrame) -> pd.DataFrame:
+    if phl_totals.empty:
+        return pd.DataFrame()
+    latest = phl_totals.sort_values("_source_tab_date").drop_duplicates(["_source_tab_date", "_route_key"], keep="last").copy()
+    latest["Overflow Status"] = latest.apply(classify_overflow, axis=1)
+    latest["Pallet Threshold"] = 30
+    latest["Weight Threshold"] = 45000
+    latest["Pallet Utilization"] = pd.to_numeric(latest["Total Pallet Estimate"], errors="coerce").fillna(0) / latest["Pallet Threshold"]
+    latest["Weight Utilization"] = pd.to_numeric(latest["Total Weight"], errors="coerce").fillna(0) / latest["Weight Threshold"]
+    return latest
+
+
+def plan_lane_readiness(plan: pd.DataFrame) -> pd.DataFrame:
+    if plan.empty:
+        return pd.DataFrame()
+    work = plan.copy()
+    for col in ["Units_NYP", "Picked_Units", "Pallets Final", "Pallets_Complete", "Pallet_Total"]:
+        if col not in work.columns:
+            work[col] = 0
+        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
+    work["Loaded_Flag"] = work["Plan Stage"].eq("Loaded") if "Plan Stage" in work.columns else False
+    work["Staged_Flag"] = work["Plan Stage"].eq("Staged") if "Plan Stage" in work.columns else False
+    work["Picking_Flag"] = work["Plan Stage"].eq("Picking") if "Plan Stage" in work.columns else False
+    work["Allocated_Flag"] = work["Plan Stage"].eq("Allocated") if "Plan Stage" in work.columns else False
+    work["Missing_Flag"] = work["Plan Match Status"].eq("Missing in OB") if "Plan Match Status" in work.columns else False
+    grouped = (
+        work.groupby(["Carrier", "_route_key"], dropna=False)
+        .agg(
+            Planned_TOs=("TO Number", "nunique"),
+            Loaded=("Loaded_Flag", "sum"),
+            Staged=("Staged_Flag", "sum"),
+            Picking=("Picking_Flag", "sum"),
+            Allocated=("Allocated_Flag", "sum"),
+            Missing_in_OB=("Missing_Flag", "sum"),
+            Planned_Pallets=("Pallets Final", "sum"),
+            Pallets_Complete=("Pallets_Complete", "sum"),
+            Units_NYP=("Units_NYP", "sum"),
+            Picked_Units=("Picked_Units", "sum"),
+        )
+        .reset_index()
+    )
+    grouped["Loaded %"] = grouped["Loaded"] / grouped["Planned_TOs"].replace(0, pd.NA)
+    grouped["Picked %"] = grouped["Picked_Units"] / (grouped["Picked_Units"] + grouped["Units_NYP"]).replace(0, pd.NA)
+    grouped["Loaded %"] = grouped["Loaded %"].fillna(0)
+    grouped["Picked %"] = grouped["Picked %"].fillna(0)
+    return grouped
+
+
+def render_plan_stage_breakdown(plan: pd.DataFrame) -> None:
+    if plan.empty:
+        st.caption("PHL Ships shipment plan is not loaded yet.")
+        return
+    counts = stage_counts(plan)
+    stage_order = ["Allocated", "Picking", "Staged", "Loaded", "Missing in OB", "Other"]
+    chart = pd.DataFrame({"Stage": stage_order, "TOs": [counts[stage] for stage in stage_order]})
+    chart = chart[chart["TOs"].gt(0)]
+    if chart.empty:
+        st.caption("No staged shipment status rows available.")
+        return
+    fig = px.bar(
+        chart,
+        x="TOs",
+        y="Stage",
+        orientation="h",
+        text="TOs",
+        color="Stage",
+        color_discrete_map={
+            "Allocated": "#c62828",
+            "Picking": "#f9a825",
+            "Staged": "#3a77a8",
+            "Loaded": "#2e7d32",
+            "Missing in OB": "#6b7280",
+            "Other": "#64748b",
+        },
+        labels={"TOs": "TOs", "Stage": ""},
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_layout(height=max(250, 36 * len(chart)), margin=dict(l=10, r=60, t=10, b=10), showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_phl_plan_control(context: DailyHealthContext) -> None:
     if context.phl_source and context.shipment_plan.empty:
         st.caption("PHL Ships is connected, but no shipDate allocation tables are available in the app cache yet.")
@@ -4398,6 +4705,9 @@ def render_phl_plan_control(context: DailyHealthContext) -> None:
         return
 
     summary = summarize_phl_shipment_plan(context.shipment_plan)
+    overflows = overflow_summary(context.phl_totals)
+    overflow_count = int(overflows["Overflow Status"].eq("Overflow").sum()) if not overflows.empty else 0
+    capacity_count = int(overflows["Overflow Status"].eq("At Capacity").sum()) if not overflows.empty else 0
     st.markdown('<div class="gp-section-label">PHL Ships Plan vs OB Tracker</div>', unsafe_allow_html=True)
     render_enterprise_kpi_grid(
         [
@@ -4425,8 +4735,14 @@ def render_phl_plan_control(context: DailyHealthContext) -> None:
                 "delta": "Ship date vs planned ship date",
                 "accent": "yellow" if int(summary["mismatch"]) else "green",
             },
+            {
+                "label": "Overflow / Capacity",
+                "value": f"{format_number(overflow_count)} / {format_number(capacity_count)}",
+                "delta": ">30 pallets or >45k lbs",
+                "accent": "red" if overflow_count else "yellow" if capacity_count else "green",
+            },
         ],
-        columns=4,
+        columns=5,
     )
 
     route_summary = (
@@ -4442,9 +4758,11 @@ def render_phl_plan_control(context: DailyHealthContext) -> None:
         .reset_index()
     )
     if not context.phl_totals.empty:
-        totals = context.phl_totals.sort_values("_source_tab_date").drop_duplicates("_route_key", keep="last")
+        totals = context.phl_totals.copy()
+        totals["Overflow Status"] = totals.apply(classify_overflow, axis=1)
+        totals = totals.sort_values("_source_tab_date").drop_duplicates("_route_key", keep="last")
         route_summary = route_summary.merge(
-            totals[["_route_key", "Total Pallet Estimate", "Adhoc"]],
+            totals[["_route_key", "Total Pallet Estimate", "Total Weight", "Adhoc", "Overflow Status"]],
             on="_route_key",
             how="left",
         )
@@ -4452,31 +4770,59 @@ def render_phl_plan_control(context: DailyHealthContext) -> None:
     route_summary.loc[route_summary["Missing_in_OB"].gt(0), "Route Alert"] = "Missing in OB"
     route_summary.loc[route_summary["Date_Mismatches"].gt(0), "Route Alert"] = "Date Mismatch"
     route_summary.loc[route_summary["Late_TOs"].gt(0), "Route Alert"] = "Late / At Risk"
-    if "Adhoc" in route_summary.columns:
-        route_summary.loc[route_summary["Adhoc"].astype(str).str.contains("overflow", case=False, na=False), "Route Alert"] = "Overflow"
-        route_summary.loc[route_summary["Adhoc"].astype(str).str.contains("capacity", case=False, na=False), "Route Alert"] = "At Capacity"
+    if "Overflow Status" in route_summary.columns:
+        route_summary.loc[route_summary["Overflow Status"].eq("Overflow"), "Route Alert"] = "Overflow"
+        route_summary.loc[route_summary["Overflow Status"].eq("At Capacity"), "Route Alert"] = "At Capacity"
 
+    chart_cols = st.columns([1, 1])
     chart = route_summary.sort_values("Planned_Pallets", ascending=True)
-    fig = px.bar(
-        chart,
-        x="Planned_Pallets",
-        y="Carrier",
-        orientation="h",
-        color="Route Alert",
-        text="Planned_Pallets",
-        color_discrete_map={
-            "Normal": "#2e7d32",
-            "At Capacity": "#f9a825",
-            "Overflow": "#c62828",
-            "Missing in OB": "#c62828",
-            "Date Mismatch": "#f9a825",
-            "Late / At Risk": "#c62828",
-        },
-        labels={"Planned_Pallets": "Planned Pallets", "Carrier": ""},
-    )
-    fig.update_traces(texttemplate="%{text:.0f}", textposition="outside", cliponaxis=False)
-    fig.update_layout(height=max(300, 34 * len(chart)), margin=dict(l=10, r=80, t=10, b=10))
-    st.plotly_chart(fig, use_container_width=True)
+    with chart_cols[0]:
+        fig = px.bar(
+            chart,
+            x="Planned_Pallets",
+            y="Carrier",
+            orientation="h",
+            color="Route Alert",
+            text="Planned_Pallets",
+            color_discrete_map={
+                "Normal": "#2e7d32",
+                "At Capacity": "#f9a825",
+                "Overflow": "#c62828",
+                "Missing in OB": "#c62828",
+                "Date Mismatch": "#f9a825",
+                "Late / At Risk": "#c62828",
+            },
+            labels={"Planned_Pallets": "Planned Pallets", "Carrier": ""},
+        )
+        fig.add_vline(x=30, line_dash="dash", line_color="#c62828")
+        fig.update_traces(texttemplate="%{text:.0f}", textposition="outside", cliponaxis=False)
+        fig.update_layout(height=max(300, 34 * len(chart)), margin=dict(l=10, r=80, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    with chart_cols[1]:
+        if "Total Weight" in chart.columns:
+            weight_chart = chart.copy()
+            weight_chart["Total Weight"] = pd.to_numeric(weight_chart["Total Weight"], errors="coerce").fillna(0)
+            fig_weight = px.bar(
+                weight_chart.sort_values("Total Weight", ascending=True),
+                x="Total Weight",
+                y="Carrier",
+                orientation="h",
+                color="Route Alert",
+                text="Total Weight",
+                color_discrete_map={
+                    "Normal": "#2e7d32",
+                    "At Capacity": "#f9a825",
+                    "Overflow": "#c62828",
+                    "Missing in OB": "#c62828",
+                    "Date Mismatch": "#f9a825",
+                    "Late / At Risk": "#c62828",
+                },
+                labels={"Total Weight": "Total Weight", "Carrier": ""},
+            )
+            fig_weight.add_vline(x=45000, line_dash="dash", line_color="#c62828")
+            fig_weight.update_traces(texttemplate="%{text:,.0f}", textposition="outside", cliponaxis=False)
+            fig_weight.update_layout(height=max(300, 34 * len(weight_chart)), margin=dict(l=10, r=90, t=10, b=10))
+            st.plotly_chart(fig_weight, use_container_width=True)
 
     issue_rows = context.shipment_plan[
         context.shipment_plan["Plan Match Status"].isin(["Missing in OB", "Date Mismatch", "Late / At Risk"])
@@ -8845,6 +9191,24 @@ def render_embed_transportation_control(context: DailyHealthContext) -> None:
     render_phl_plan_control(context)
 
 
+def render_phl_ship_plan_embed(context: DailyHealthContext) -> None:
+    plan_summary = summarize_phl_shipment_plan(context.shipment_plan)
+    status = "Waiting"
+    if not context.shipment_plan.empty:
+        status = "Red" if int(plan_summary["missing"]) or int(plan_summary["late"]) else "Yellow" if int(plan_summary["mismatch"]) else "Green"
+    render_enterprise_module_header(
+        "Transportation Control",
+        "PHL Ships Plan Control",
+        "Focused module for shipment plan, OB Tracker alignment, Fill Rate readiness, and linehaul overflow thresholds.",
+        status,
+        f"PHL Ships tabs {len(context.phl_sheets)} | {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
+    )
+    if context.shipment_plan.empty:
+        st.info("PHL Ships Plan Control is waiting on shipDate tabs from the PHL Ships Google Sheet.")
+        return
+    render_phl_plan_control(context)
+
+
 def render_google_sites_embed(embed_mode: str) -> None:
     st.markdown('<div class="gp-embed-shell">', unsafe_allow_html=True)
     install_google_refresh_timer()
@@ -8872,6 +9236,8 @@ def render_google_sites_embed(embed_mode: str) -> None:
         render_daily_ops_labor_embed(context)
     elif embed_mode in {"transportation_control", "transportation_allocations"}:
         render_embed_transportation_control(context)
+    elif embed_mode in {"phl_ship_plan", "shipment_plan"}:
+        render_phl_ship_plan_embed(context)
     elif embed_mode in {"executive_brief", "executive_briefs", "executive_shipping_readiness", "executive_briefing_center"}:
         render_executive_briefs_view(context, health, ops_data)
     elif embed_mode in {"executive_summary", "executive_brief_summary"}:
