@@ -2036,7 +2036,7 @@ def standardize_phl_shipments(table: pd.DataFrame, tab_name: str, tab_date: pd.T
     result["Total Weight"] = pd.to_numeric(table[weight_col], errors="coerce").fillna(0) if weight_col else 0
     result["_source_tab"] = tab_name
     result["_source_tab_date"] = tab_date
-    result["_to_key"] = result["TO Number"].str.upper().str.strip()
+    result["_to_key"] = result["TO Number"].map(canonical_to_key)
     result["_route_key"] = result["Carrier"].map(normalize_route_key)
     result = result[result["_to_key"].str.len().gt(0) & ~result["_to_key"].str.casefold().isin({"nan", "none"})]
     return result.reset_index(drop=True)
@@ -2132,7 +2132,7 @@ def build_phl_shipment_plan(phl_shipments: pd.DataFrame, ob_tracker: pd.DataFram
     if phl_shipments.empty:
         return pd.DataFrame()
     plan = phl_shipments.copy()
-    plan["_to_key"] = plan["TO Number"].astype(str).str.upper().str.strip()
+    plan["_to_key"] = plan["TO Number"].map(canonical_to_key)
     if ob_tracker.empty:
         plan["OB Status"] = "Missing in OB"
         plan["OB Planned Ship Date"] = pd.NaT
@@ -2149,7 +2149,7 @@ def build_phl_shipment_plan(phl_shipments: pd.DataFrame, ob_tracker: pd.DataFram
     ob_planned_ship_col = first_matching_column(ob_tracker, [["planned", "ship", "date"], ["ship", "date"]])
     ob_location_col = first_matching_column(ob_tracker, [["locations"], ["location"]])
     ob = ob_tracker.copy()
-    ob["_to_key"] = ob[ob_to_col].astype(str).str.upper().str.strip()
+    ob["_to_key"] = ob[ob_to_col].map(canonical_to_key)
     ob = ob[ob["_to_key"].str.len().gt(0)]
     ob = ob.drop_duplicates("_to_key", keep="last")
     ob_cols = ["_to_key"]
@@ -2212,7 +2212,7 @@ def build_fill_rate_detail(fill_rate: pd.DataFrame) -> pd.DataFrame:
     work = fill_rate.copy()
     result = pd.DataFrame(index=work.index)
     result["TO Number"] = work[to_col].map(cell_text)
-    result["_to_key"] = result["TO Number"].str.upper().str.strip()
+    result["_to_key"] = result["TO Number"].map(canonical_to_key)
     result["Fill Carrier"] = work[carrier_col].map(cell_text) if carrier_col else ""
     result["Fill Location"] = work[location_col].map(cell_text) if location_col else ""
     result["Dock Door"] = work[dock_col].map(cell_text) if dock_col else ""
@@ -2263,7 +2263,9 @@ def merge_shipment_plan_readiness(shipment_plan: pd.DataFrame, fill_rate: pd.Dat
 
     pallet_summary = summarize_gusto_pallet_progress(load_all_daily_pallet_counts())
     if not pallet_summary.empty:
-        plan = plan.merge(pallet_summary, left_on="TO Number", right_on="Gusto", how="left")
+        pallet_summary = pallet_summary.copy()
+        pallet_summary["_to_key"] = pallet_summary["Gusto"].map(canonical_to_key) if "Gusto" in pallet_summary.columns else ""
+        plan = plan.merge(pallet_summary, on="_to_key", how="left")
     for col in ["Pallet_Total", "Pallets_Complete", "Pallet_Weight"]:
         if col not in plan.columns:
             plan[col] = 0
@@ -2579,6 +2581,17 @@ def merge_fill_rate_readiness(progress: pd.DataFrame, fill_rate: pd.DataFrame) -
 def cell_text(value: object) -> str:
     text = str(value or "").strip()
     return "" if text.lower() in {"nan", "none"} else text
+
+
+def canonical_to_key(value: object) -> str:
+    text = cell_text(value).upper()
+    if not text:
+        return ""
+    match = re.search(r"(?:GUSTO|BEVTO)[\s_-]*(\d+)", text)
+    if match:
+        return match.group(1)
+    digits = re.sub(r"\D+", "", text)
+    return digits if len(digits) >= 4 else text
 
 
 def numeric_value(value: object) -> float:
@@ -3802,12 +3815,10 @@ def build_open_to_detail(context: DailyHealthContext, carrier: str) -> pd.DataFr
     detail["Units"] = pd.to_numeric(detail[units_col], errors="coerce").fillna(0) if units_col else 0
     pallet_summary = summarize_gusto_pallet_progress(load_all_daily_pallet_counts())
     if not pallet_summary.empty:
-        detail = detail.merge(
-            pallet_summary,
-            left_on="GUSTO / TO",
-            right_on="Gusto",
-            how="left",
-        )
+        detail["_to_key"] = detail["GUSTO / TO"].map(canonical_to_key)
+        pallet_summary = pallet_summary.copy()
+        pallet_summary["_to_key"] = pallet_summary["Gusto"].map(canonical_to_key) if "Gusto" in pallet_summary.columns else ""
+        detail = detail.merge(pallet_summary, on="_to_key", how="left")
     for col in ["Pallet_Total", "Pallets_Complete", "Pallet_Weight"]:
         if col not in detail.columns:
             detail[col] = 0
@@ -7761,63 +7772,147 @@ def render_schedule_sync(ship_allocation_records: pd.DataFrame) -> None:
 
 def render_outbound_to_control() -> None:
     st.subheader("Outbound TO Control")
-    st.caption("Uses the OB TO Tracker workbook to surface status, remaining work, and pick/ship date risk before tendering.")
-    ref, tracker = read_reference_type_table("OB TO Tracker", ["MASTER"])
-    if tracker.empty:
-        st.info("Upload DC1 OB TO Tracker.xlsx as a reference sheet to populate this view.")
+    st.caption("Connected-sheet view: PHL Ships is the plan, OB Tracker is execution status, and Fill Rate/Pallet counts add readiness detail.")
+    context = load_daily_health_context()
+
+    source_rows = [
+        {
+            "Feed": "PHL Ships plan",
+            "Connected sheet": context.phl_source or "Not connected",
+            "Cached rows": len(context.phl_shipments),
+            "Tabs used": ", ".join(context.phl_sheets[-3:]) if context.phl_sheets else "",
+        },
+        {
+            "Feed": "OB Tracker execution",
+            "Connected sheet": context.ob_source or "Not connected",
+            "Cached rows": len(context.ob_tracker),
+            "Tabs used": ", ".join(context.ob_sheets[-3:]) if context.ob_sheets else context.ob_reason,
+        },
+        {
+            "Feed": "Fill Rate readiness",
+            "Connected sheet": context.fill_source or "Not connected",
+            "Cached rows": len(context.fill_rate),
+            "Tabs used": "",
+        },
+    ]
+    st.dataframe(pd.DataFrame(source_rows), use_container_width=True, hide_index=True)
+
+    if context.shipment_plan.empty:
+        if context.phl_source:
+            st.info("PHL Ships is connected, but no shipDate allocation table has been parsed into the shipment plan yet.")
+        else:
+            st.info("Connect PHL Ships to build this control view.")
         return
 
-    carrier_col = first_matching_column(tracker, [["carrier"]])
-    status_col = first_matching_column(tracker, [["status"]])
-    to_col = first_matching_column(tracker, [["to"]])
-    lines_col = first_matching_column(tracker, [["lines", "remaining"], ["lines"]])
-    units_col = first_matching_column(tracker, [["units"]])
-    pick_col = first_matching_column(tracker, [["planned", "pick"], ["pick", "date"]])
-    ship_col = first_matching_column(tracker, [["planned", "ship"], ["ship", "date"]])
-    work = tracker.copy()
-    if lines_col:
-        work["lines_remaining_num"] = pd.to_numeric(work[lines_col], errors="coerce").fillna(0)
-    else:
-        work["lines_remaining_num"] = 0
-    if units_col:
-        work["units_num"] = pd.to_numeric(work[units_col], errors="coerce").fillna(0)
-    else:
-        work["units_num"] = 0
-    if pick_col:
-        work["planned_pick_dt"] = pd.to_datetime(work[pick_col], errors="coerce")
-    else:
-        work["planned_pick_dt"] = pd.NaT
-    if ship_col:
-        work["planned_ship_dt"] = pd.to_datetime(work[ship_col], errors="coerce")
-    else:
-        work["planned_ship_dt"] = pd.NaT
-    today = pd.Timestamp(now_eastern()).normalize()
-    work["risk"] = "Normal"
-    work.loc[work["planned_pick_dt"].notna() & work["planned_pick_dt"].dt.normalize().le(today + pd.Timedelta(days=1)) & work["lines_remaining_num"].gt(0), "risk"] = "Pick Risk"
-    work.loc[work["planned_ship_dt"].notna() & work["planned_ship_dt"].dt.normalize().le(today + pd.Timedelta(days=1)) & work["lines_remaining_num"].gt(0), "risk"] = "Ship Risk"
+    summary = summarize_phl_shipment_plan(context.shipment_plan)
+    stage_summary = stage_counts(context.shipment_plan)
+    overflows = overflow_summary(context.phl_totals)
+    overflow_count = int(overflows["Overflow Status"].eq("Overflow").sum()) if not overflows.empty else 0
+    render_enterprise_kpi_grid(
+        [
+            {
+                "label": "Planned TOs",
+                "value": format_number(summary["planned_tos"]),
+                "delta": f"{format_number(summary['planned_pallets'])} pallets",
+                "accent": "neutral",
+            },
+            {
+                "label": "Loaded",
+                "value": f"{format_number(summary['loaded'])} / {format_number(summary['planned_tos'])}",
+                "delta": format_percent(summary["completion"]),
+                "accent": "green" if float(summary["completion"]) >= 0.9 else "yellow",
+            },
+            {
+                "label": "Picking / Staged",
+                "value": f"{format_number(stage_summary['Picking'])} / {format_number(stage_summary['Staged'])}",
+                "delta": "OB execution stages",
+                "accent": "neutral",
+            },
+            {
+                "label": "Missing / Mismatch",
+                "value": f"{format_number(summary['missing'])} / {format_number(summary['mismatch'])}",
+                "delta": "PHL Ships vs OB",
+                "accent": "red" if int(summary["missing"]) or int(summary["mismatch"]) else "green",
+            },
+            {
+                "label": "Overflow lanes",
+                "value": format_number(overflow_count),
+                "delta": ">30 pallets or >45k lbs",
+                "accent": "red" if overflow_count else "green",
+            },
+        ],
+        columns=5,
+    )
 
-    metrics = st.columns(4)
-    metrics[0].metric("TOs", format_number(work[to_col].nunique() if to_col else len(work)))
-    metrics[1].metric("Lines Remaining", format_number(work["lines_remaining_num"].sum()))
-    metrics[2].metric("Units", format_number(work["units_num"].sum()))
-    metrics[3].metric("Risk Loads", format_number(work["risk"].ne("Normal").sum()))
+    tabs = st.tabs(["Plan vs OB", "Route readiness", "Overflow lanes"])
+    with tabs[0]:
+        render_plan_stage_breakdown(context.shipment_plan)
+        issue_rows = context.shipment_plan[
+            context.shipment_plan["Plan Match Status"].isin(["Missing in OB", "Date Mismatch", "Late / At Risk"])
+        ].copy()
+        if issue_rows.empty:
+            st.success("PHL Ships is aligned to the connected OB Tracker for the cached shipDate tabs.")
+        else:
+            st.markdown('<div class="gp-section-label">Plan Exceptions</div>', unsafe_allow_html=True)
+            issue_cols = [
+                "Carrier",
+                "TO Number",
+                "goPuff Site Location",
+                "Ship Date",
+                "Delivery Date",
+                "OB Planned Ship Date",
+                "OB Status",
+                "Plan Match Status",
+                "Pallets Final",
+                "_source_tab",
+            ]
+            st.dataframe(issue_rows[[col for col in issue_cols if col in issue_rows.columns]].head(100), use_container_width=True, hide_index=True)
 
-    if carrier_col:
-        group_cols = [carrier_col]
-        if status_col:
-            group_cols.append(status_col)
-        summary = work.groupby(group_cols, dropna=False).agg(
-            tos=(to_col if to_col else work.columns[0], "nunique"),
-            lines_remaining=("lines_remaining_num", "sum"),
-            units=("units_num", "sum"),
-            risk_loads=("risk", lambda values: int((values != "Normal").sum())),
-        ).reset_index()
-        st.subheader("TO Status by Carrier")
-        st.dataframe(summary, use_container_width=True, hide_index=True)
+    with tabs[1]:
+        lane = plan_lane_readiness(context.shipment_plan)
+        if lane.empty:
+            st.info("No route-level readiness is available yet.")
+        else:
+            display_cols = [
+                "Carrier",
+                "Planned_TOs",
+                "Loaded",
+                "Staged",
+                "Picking",
+                "Allocated",
+                "Missing_in_OB",
+                "Planned_Pallets",
+                "Pallets_Complete",
+                "Units_NYP",
+                "Picked_Units",
+                "Loaded %",
+                "Picked %",
+            ]
+            lane_display = lane[[col for col in display_cols if col in lane.columns]].sort_values(
+                ["Missing_in_OB", "Units_NYP", "Planned_Pallets"],
+                ascending=[False, False, False],
+            )
+            st.dataframe(lane_display, use_container_width=True, hide_index=True)
 
-    st.subheader("Loads Needing Attention")
-    detail_cols = [col for col in [carrier_col, status_col, to_col, lines_col, units_col, pick_col, ship_col, "risk"] if col]
-    st.dataframe(work[detail_cols].sort_values("risk", ascending=False).head(150), use_container_width=True, hide_index=True)
+    with tabs[2]:
+        if overflows.empty:
+            st.info("PHL Ships totals table is not available yet.")
+        else:
+            overflow_display = overflows[
+                [
+                    col
+                    for col in [
+                        "Carrier",
+                        "Total Pallet Estimate",
+                        "Total Weight",
+                        "Adhoc",
+                        "Overflow Status",
+                        "_source_tab",
+                    ]
+                    if col in overflows.columns
+                ]
+            ].sort_values(["Overflow Status", "Total Pallet Estimate", "Total Weight"], ascending=[True, False, False])
+            st.dataframe(overflow_display, use_container_width=True, hide_index=True)
 
 
 def render_daily_pallet_completion_visual() -> None:
