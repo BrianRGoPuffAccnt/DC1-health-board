@@ -36,9 +36,9 @@ GOOGLE_TOKEN_PATH = Path("data/google_token.json")
 LIVE_GOOGLE_ONLY = True
 # Full refresh (all connected sheets) runs every 4 hours during operational hours plus a 4 AM overnight run.
 GOOGLE_REFRESH_SCHEDULE_HOURS = [4, 5, 9, 13, 17, 21]
-# Live refresh (OB Tracker + Fill Rate only) runs every hour from 5 AM through 11 PM.
+# Live refresh (OB Tracker + Fill Rate + PHL Ships only) runs every hour from 5 AM through 11 PM.
 GOOGLE_LIVE_REFRESH_HOURS = list(range(5, 24))
-GOOGLE_LIVE_SHEET_TYPES = ["OB TO Tracker", "Fill Rate"]
+GOOGLE_LIVE_SHEET_TYPES = ["OB TO Tracker", "Fill Rate", "PHL Ships"]
 AUTO_REFRESH_CHECK_MINUTES = 5
 STATUS_OPTIONS = ["Not Tendered", "Tendered", "Confirmed", "At Risk", "Escalated"]
 LEAN_MATRIX_COLUMNS = ["area", "owner", "deadline", "status", "notes"]
@@ -165,6 +165,7 @@ REFERENCE_SHEET_TAGS = [
     "Tender Template",
     "Transportation Schedule",
     "Carrier Mapping",
+    "PHL Ships",
     "Site Information",
     "S&OP",
     "Rates",
@@ -359,11 +360,17 @@ class DailyHealthContext:
     sdt: pd.DataFrame
     ob_tracker: pd.DataFrame
     fill_rate: pd.DataFrame
+    phl_shipments: pd.DataFrame
+    phl_totals: pd.DataFrame
+    phl_sdt: pd.DataFrame
+    shipment_plan: pd.DataFrame
     sdt_source: str
     ob_source: str
     fill_source: str
+    phl_source: str
     ob_sheet: str
     ob_sheets: list[str]
+    phl_sheets: list[str]
     ob_reason: str
     ob_target_day: pd.Timestamp
     matched_columns: dict[str, str]
@@ -1645,6 +1652,8 @@ def detect_reference_workbook_type(filename: str, metadata: dict[str, object]) -
         return "Transportation Schedule"
     if "linehaul tender template" in haystack or ("upload output" in haystack and "business_unit_type" in haystack):
         return "Tender Template"
+    if "phl ships" in haystack or "shipdate" in haystack or ("to number" in haystack and "pallets final" in haystack and "delivery date" in haystack):
+        return "PHL Ships"
     if "alloc tracking" in haystack or ("allocation date" in haystack and "planned pick date" in haystack and "planned ship date" in haystack):
         return "Allocation History"
     return "Other"
@@ -1902,6 +1911,314 @@ def previous_working_day(day: datetime | pd.Timestamp | None = None) -> pd.Times
 
 def date_sheet_name(day: pd.Timestamp) -> str:
     return f"{int(day.month)}.{int(day.day)}"
+
+
+def parse_shipdate_sheet_name(sheet_name: str) -> pd.Timestamp | None:
+    text = str(sheet_name or "").strip()
+    match = re.search(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b", text)
+    if not match or "shipdate" not in re.sub(r"\s+", "", text).casefold():
+        return None
+    month = int(match.group(1))
+    day_num = int(match.group(2))
+    year = int(match.group(3)) if match.group(3) else now_eastern().year
+    if year < 100:
+        year += 2000
+    try:
+        return pd.Timestamp(year=year, month=month, day=day_num).normalize()
+    except ValueError:
+        return None
+
+
+def cell_is_blank(value: object) -> bool:
+    text = str(value or "").strip()
+    return not text or text.casefold() in {"nan", "none", "nat"}
+
+
+def row_window_text(row: pd.Series, start_col: int, width: int = 12) -> str:
+    values = row.iloc[start_col : min(len(row), start_col + width)].tolist()
+    return " | ".join(str(value).strip().casefold() for value in values if not cell_is_blank(value))
+
+
+def detect_phl_table_headers(raw: pd.DataFrame) -> list[dict[str, object]]:
+    headers: list[dict[str, object]] = []
+    for row_idx, row in raw.head(40).iterrows():
+        for col_idx, value in enumerate(row.tolist()):
+            label = str(value or "").strip().casefold()
+            if label not in {"carrier", "route"}:
+                continue
+            window = row_window_text(row, col_idx)
+            role = ""
+            if label == "carrier" and "to number" in window and "ship date" in window:
+                role = "shipments"
+            elif label == "carrier" and "total pallet" in window and "total weight" in window:
+                role = "totals"
+            elif label == "route" and "load ready" in window and "departure" in window:
+                role = "sdt"
+            if role:
+                headers.append({"role": role, "row": row_idx, "col": col_idx})
+    seen: set[tuple[str, int, int]] = set()
+    unique_headers = []
+    for header in headers:
+        key = (str(header["role"]), int(header["row"]), int(header["col"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_headers.append(header)
+    return unique_headers
+
+
+def extract_grid_table(raw: pd.DataFrame, header: dict[str, object]) -> pd.DataFrame:
+    header_row = int(header["row"])
+    start_col = int(header["col"])
+    header_values = raw.iloc[header_row].fillna("").astype(str).str.strip().tolist()
+    end_col = start_col
+    blanks_seen = 0
+    for idx in range(start_col, len(header_values)):
+        if cell_is_blank(header_values[idx]):
+            blanks_seen += 1
+            if blanks_seen:
+                break
+        else:
+            blanks_seen = 0
+            end_col = idx + 1
+    if end_col <= start_col:
+        return pd.DataFrame()
+
+    columns: list[str] = []
+    seen: dict[str, int] = {}
+    for idx, value in enumerate(header_values[start_col:end_col]):
+        base = value if value and value.casefold() != "nan" else f"Column {idx + 1}"
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        columns.append(base if count == 0 else f"{base}_{count + 1}")
+
+    rows = []
+    empty_streak = 0
+    for row_idx in range(header_row + 1, len(raw)):
+        row_values = raw.iloc[row_idx, start_col:end_col].tolist()
+        if all(cell_is_blank(value) for value in row_values):
+            empty_streak += 1
+            if empty_streak >= 2:
+                break
+            continue
+        empty_streak = 0
+        rows.append(row_values)
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    table = pd.DataFrame(rows, columns=columns)
+    return table.dropna(how="all").reset_index(drop=True)
+
+
+def standardize_phl_shipments(table: pd.DataFrame, tab_name: str, tab_date: pd.Timestamp) -> pd.DataFrame:
+    if table.empty:
+        return pd.DataFrame()
+    carrier_col = first_matching_column(table, [["carrier"]])
+    to_col = first_matching_column(table, [["to", "number"], ["to"]])
+    location_col = first_matching_column(table, [["gopuff", "site", "location"], ["site", "location"], ["location"]])
+    site_id_col = first_matching_column(table, [["site", "id"]])
+    ship_date_col = first_matching_column(table, [["ship", "date"]])
+    delivery_date_col = first_matching_column(table, [["delivery", "date"]])
+    pallets_col = first_matching_column(table, [["pallets", "final"], ["pallet"]])
+    weight_col = first_matching_column(table, [["total", "weight"], ["weight"]])
+    if not carrier_col or not to_col:
+        return pd.DataFrame()
+    result = pd.DataFrame(index=table.index)
+    result["Carrier"] = table[carrier_col].map(cell_text)
+    result["TO Number"] = table[to_col].map(cell_text)
+    result["goPuff Site Location"] = table[location_col].map(cell_text) if location_col else ""
+    result["Site ID"] = table[site_id_col].map(cell_text) if site_id_col else ""
+    result["Ship Date"] = pd.to_datetime(table[ship_date_col], errors="coerce") if ship_date_col else pd.NaT
+    result["Ship Date"] = result["Ship Date"].fillna(tab_date)
+    result["Delivery Date"] = pd.to_datetime(table[delivery_date_col], errors="coerce") if delivery_date_col else pd.NaT
+    result["Pallets Final"] = pd.to_numeric(table[pallets_col], errors="coerce").fillna(0) if pallets_col else 0
+    result["Total Weight"] = pd.to_numeric(table[weight_col], errors="coerce").fillna(0) if weight_col else 0
+    result["_source_tab"] = tab_name
+    result["_source_tab_date"] = tab_date
+    result["_to_key"] = result["TO Number"].str.upper().str.strip()
+    result["_route_key"] = result["Carrier"].map(normalize_route_key)
+    result = result[result["_to_key"].str.len().gt(0) & ~result["_to_key"].str.casefold().isin({"nan", "none"})]
+    return result.reset_index(drop=True)
+
+
+def standardize_phl_totals(table: pd.DataFrame, tab_name: str, tab_date: pd.Timestamp) -> pd.DataFrame:
+    if table.empty:
+        return pd.DataFrame()
+    carrier_col = first_matching_column(table, [["carrier"]])
+    pallets_col = first_matching_column(table, [["total", "pallet"], ["pallet", "estimate"]])
+    weight_col = first_matching_column(table, [["total", "weight"], ["weight"]])
+    adhoc_col = first_matching_column(table, [["adhoc"], ["ad", "hoc"]])
+    if not carrier_col:
+        return pd.DataFrame()
+    result = pd.DataFrame(index=table.index)
+    result["Carrier"] = table[carrier_col].map(cell_text)
+    result["Total Pallet Estimate"] = pd.to_numeric(table[pallets_col], errors="coerce").fillna(0) if pallets_col else 0
+    result["Total Weight"] = pd.to_numeric(table[weight_col], errors="coerce").fillna(0) if weight_col else 0
+    result["Adhoc"] = table[adhoc_col].map(cell_text) if adhoc_col else ""
+    result["_source_tab"] = tab_name
+    result["_source_tab_date"] = tab_date
+    result["_route_key"] = result["Carrier"].map(normalize_route_key)
+    result = result[result["Carrier"].str.len().gt(0) & ~result["Carrier"].str.casefold().isin({"nan", "none", "total (all)"})]
+    return result.reset_index(drop=True)
+
+
+def standardize_phl_sdt(table: pd.DataFrame, tab_name: str, tab_date: pd.Timestamp) -> pd.DataFrame:
+    if table.empty:
+        return pd.DataFrame()
+    route_col = first_matching_column(table, [["route"], ["carrier"]])
+    ready_col = first_matching_column(table, [["load", "ready"]])
+    depart_col = first_matching_column(table, [["departure"]])
+    shift_col = first_matching_column(table, [["shift"]])
+    if not route_col:
+        return pd.DataFrame()
+    result = pd.DataFrame(index=table.index)
+    result["Route"] = table[route_col].map(cell_text)
+    result["Load Ready Time"] = table[ready_col].map(cell_text) if ready_col else ""
+    result["Departure Time"] = table[depart_col].map(cell_text) if depart_col else ""
+    result["Shift on Duty"] = table[shift_col].map(cell_text) if shift_col else ""
+    result["_source_tab"] = tab_name
+    result["_source_tab_date"] = tab_date
+    result["_route_key"] = result["Route"].map(normalize_route_key)
+    result = result[result["Route"].str.len().gt(0)]
+    return result.reset_index(drop=True)
+
+
+def load_phl_ships_context() -> tuple[pd.Series | None, pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
+    connection = latest_google_sheet_by_type("PHL Ships")
+    if connection is None:
+        return None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
+    ship_tabs = [
+        (sheet, parsed)
+        for sheet in list_google_sheet_names(connection)
+        if (parsed := parse_shipdate_sheet_name(sheet)) is not None
+    ]
+    ship_tabs.sort(key=lambda item: item[1])
+    shipment_frames: list[pd.DataFrame] = []
+    total_frames: list[pd.DataFrame] = []
+    sdt_frames: list[pd.DataFrame] = []
+    loaded_tabs: list[str] = []
+    for sheet_name, tab_date in ship_tabs:
+        values = read_google_sheet_named_values(connection, sheet_name)
+        if not values:
+            continue
+        raw = pd.DataFrame(values)
+        headers = detect_phl_table_headers(raw)
+        if not headers:
+            continue
+        loaded_tabs.append(sheet_name)
+        for header in headers:
+            table = extract_grid_table(raw, header)
+            role = str(header["role"])
+            if role == "shipments":
+                standardized = standardize_phl_shipments(table, sheet_name, tab_date)
+                if not standardized.empty:
+                    shipment_frames.append(standardized)
+            elif role == "totals":
+                standardized = standardize_phl_totals(table, sheet_name, tab_date)
+                if not standardized.empty:
+                    total_frames.append(standardized)
+            elif role == "sdt":
+                standardized = standardize_phl_sdt(table, sheet_name, tab_date)
+                if not standardized.empty:
+                    sdt_frames.append(standardized)
+    shipments = pd.concat(shipment_frames, ignore_index=True) if shipment_frames else pd.DataFrame()
+    totals = pd.concat(total_frames, ignore_index=True) if total_frames else pd.DataFrame()
+    sdt = pd.concat(sdt_frames, ignore_index=True) if sdt_frames else pd.DataFrame()
+    return connection, shipments, totals, sdt, loaded_tabs
+
+
+def build_phl_shipment_plan(phl_shipments: pd.DataFrame, ob_tracker: pd.DataFrame) -> pd.DataFrame:
+    if phl_shipments.empty:
+        return pd.DataFrame()
+    plan = phl_shipments.copy()
+    plan["_to_key"] = plan["TO Number"].astype(str).str.upper().str.strip()
+    if ob_tracker.empty:
+        plan["OB Status"] = "Missing in OB"
+        plan["OB Planned Ship Date"] = pd.NaT
+        plan["Plan Match Status"] = "Missing in OB"
+        return plan
+
+    ob_to_col = first_matching_column(ob_tracker, [["to"], ["po", "number"]])
+    if not ob_to_col:
+        plan["OB Status"] = "Missing in OB"
+        plan["OB Planned Ship Date"] = pd.NaT
+        plan["Plan Match Status"] = "Missing in OB"
+        return plan
+    ob_status_col = first_matching_column(ob_tracker, [["status"]])
+    ob_planned_ship_col = first_matching_column(ob_tracker, [["planned", "ship", "date"], ["ship", "date"]])
+    ob_location_col = first_matching_column(ob_tracker, [["locations"], ["location"]])
+    ob = ob_tracker.copy()
+    ob["_to_key"] = ob[ob_to_col].astype(str).str.upper().str.strip()
+    ob = ob[ob["_to_key"].str.len().gt(0)]
+    ob = ob.drop_duplicates("_to_key", keep="last")
+    ob_cols = ["_to_key"]
+    rename: dict[str, str] = {}
+    if ob_status_col:
+        ob_cols.append(ob_status_col)
+        rename[ob_status_col] = "OB Status"
+    if ob_planned_ship_col:
+        ob_cols.append(ob_planned_ship_col)
+        rename[ob_planned_ship_col] = "OB Planned Ship Date"
+    if ob_location_col:
+        ob_cols.append(ob_location_col)
+        rename[ob_location_col] = "OB Location"
+    plan = plan.merge(ob[ob_cols].rename(columns=rename), on="_to_key", how="left")
+    plan["OB Status"] = plan.get("OB Status", pd.Series("", index=plan.index)).map(cell_text)
+    plan.loc[plan["OB Status"].eq(""), "OB Status"] = "Missing in OB"
+    plan["OB Planned Ship Date"] = pd.to_datetime(plan.get("OB Planned Ship Date", pd.Series(pd.NaT, index=plan.index)), errors="coerce")
+    plan["Ship Date"] = pd.to_datetime(plan["Ship Date"], errors="coerce")
+    plan["Plan Match Status"] = "Matched"
+    plan.loc[plan["OB Status"].eq("Missing in OB"), "Plan Match Status"] = "Missing in OB"
+    date_known = plan["Ship Date"].notna() & plan["OB Planned Ship Date"].notna()
+    mismatch = date_known & plan["Ship Date"].dt.normalize().ne(plan["OB Planned Ship Date"].dt.normalize())
+    plan.loc[mismatch, "Plan Match Status"] = "Date Mismatch"
+    loaded = plan["OB Status"].str.casefold().str.contains("loaded|complete|closed", regex=True, na=False)
+    overdue = plan["Ship Date"].dt.normalize().le(pd.Timestamp(now_eastern()).normalize()) & ~loaded
+    plan.loc[overdue & ~plan["OB Status"].eq("Missing in OB"), "Plan Match Status"] = "Late / At Risk"
+    return plan.reset_index(drop=True)
+
+
+def merge_phl_plan_progress(progress: pd.DataFrame, shipment_plan: pd.DataFrame, phl_totals: pd.DataFrame) -> pd.DataFrame:
+    if progress.empty or shipment_plan.empty:
+        return progress
+    plan = shipment_plan.copy()
+    loaded = plan["OB Status"].astype(str).str.casefold().str.contains("loaded|complete|closed", regex=True, na=False)
+    plan["Plan Loaded"] = loaded
+    plan["Plan Open"] = ~loaded
+    plan["Plan Missing"] = plan["Plan Match Status"].eq("Missing in OB")
+    plan["Plan Date Mismatch"] = plan["Plan Match Status"].eq("Date Mismatch")
+    plan["Plan Late"] = plan["Plan Match Status"].eq("Late / At Risk")
+    agg = (
+        plan.groupby(["_route_key", "Carrier"], dropna=False)
+        .agg(
+            Planned_TOs=("TO Number", "nunique"),
+            Planned_Pallets=("Pallets Final", "sum"),
+            Planned_Weight=("Total Weight", "sum"),
+            Plan_Loaded=("Plan Loaded", "sum"),
+            Plan_Open=("Plan Open", "sum"),
+            Missing_in_OB=("Plan Missing", "sum"),
+            Date_Mismatches=("Plan Date Mismatch", "sum"),
+            Late_TOs=("Plan Late", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"Carrier": "PHL Carrier"})
+    )
+    if not phl_totals.empty:
+        totals = phl_totals.sort_values("_source_tab_date").drop_duplicates("_route_key", keep="last")
+        agg = agg.merge(
+            totals[["_route_key", "Total Pallet Estimate", "Adhoc"]],
+            on="_route_key",
+            how="left",
+        )
+    merged = progress.copy()
+    merged["_route_key"] = merged["Carrier"].map(normalize_route_key)
+    merged = merged.merge(agg.drop(columns=["PHL Carrier"], errors="ignore"), on="_route_key", how="left")
+    merged = merged.drop(columns=["_route_key"], errors="ignore")
+    for col in ["Planned_TOs", "Planned_Pallets", "Planned_Weight", "Plan_Loaded", "Plan_Open", "Missing_in_OB", "Date_Mismatches", "Late_TOs", "Total Pallet Estimate"]:
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0)
+    if "Adhoc" in merged.columns:
+        merged["Adhoc"] = merged["Adhoc"].fillna("")
+    return merged
 
 
 def select_ob_tracker_sheet(sheet_names: list[str], day: datetime | pd.Timestamp | None = None) -> tuple[str, pd.Timestamp, str]:
@@ -2410,6 +2727,10 @@ def load_daily_health_context() -> DailyHealthContext:
     if not ob_tracker.empty:
         ob_source = str(ob_google["name"]) if ob_google is not None else ""
 
+    phl_google, phl_shipments, phl_totals, phl_sdt, phl_sheets = load_phl_ships_context()
+    phl_source = str(phl_google["name"]) if phl_google is not None else ""
+    shipment_plan = build_phl_shipment_plan(phl_shipments, ob_tracker)
+
     progress = pd.DataFrame()
     matched_columns: dict[str, str] = {}
     if not sdt.empty and not ob_tracker.empty:
@@ -2417,6 +2738,7 @@ def load_daily_health_context() -> DailyHealthContext:
         if not progress.empty:
             progress = merge_fill_rate_readiness(progress, fill_rate)
             progress = enrich_progress_with_allocation(progress)
+            progress = merge_phl_plan_progress(progress, shipment_plan, phl_totals)
 
     ob_sheet = ob_sheets[-1] if ob_sheets else ""
     return DailyHealthContext(
@@ -2424,11 +2746,17 @@ def load_daily_health_context() -> DailyHealthContext:
         sdt=sdt,
         ob_tracker=ob_tracker,
         fill_rate=fill_rate,
+        phl_shipments=phl_shipments,
+        phl_totals=phl_totals,
+        phl_sdt=phl_sdt,
+        shipment_plan=shipment_plan,
         sdt_source=sdt_source,
         ob_source=ob_source,
         fill_source=fill_source,
+        phl_source=phl_source,
         ob_sheet=ob_sheet,
         ob_sheets=ob_sheets,
+        phl_sheets=phl_sheets,
         ob_reason=ob_reason,
         ob_target_day=ob_target_day,
         matched_columns=matched_columns,
@@ -4031,6 +4359,145 @@ def render_executive_pallet_embed(context: DailyHealthContext) -> None:
         )
         st.plotly_chart(fig, use_container_width=True)
     st.dataframe(pallet_display.head(25), use_container_width=True, hide_index=True)
+
+
+def summarize_phl_shipment_plan(plan: pd.DataFrame) -> dict[str, int | float]:
+    if plan.empty:
+        return {
+            "planned_tos": 0,
+            "planned_pallets": 0,
+            "planned_weight": 0,
+            "loaded": 0,
+            "open": 0,
+            "missing": 0,
+            "mismatch": 0,
+            "late": 0,
+            "completion": 0,
+        }
+    loaded = plan["OB Status"].astype(str).str.casefold().str.contains("loaded|complete|closed", regex=True, na=False)
+    planned_tos = int(plan["TO Number"].nunique()) if "TO Number" in plan.columns else len(plan)
+    loaded_count = int(loaded.sum())
+    return {
+        "planned_tos": planned_tos,
+        "planned_pallets": int(pd.to_numeric(plan.get("Pallets Final"), errors="coerce").fillna(0).sum()),
+        "planned_weight": int(pd.to_numeric(plan.get("Total Weight"), errors="coerce").fillna(0).sum()),
+        "loaded": loaded_count,
+        "open": max(planned_tos - loaded_count, 0),
+        "missing": int(plan.get("Plan Match Status", pd.Series(dtype=str)).eq("Missing in OB").sum()),
+        "mismatch": int(plan.get("Plan Match Status", pd.Series(dtype=str)).eq("Date Mismatch").sum()),
+        "late": int(plan.get("Plan Match Status", pd.Series(dtype=str)).eq("Late / At Risk").sum()),
+        "completion": loaded_count / planned_tos if planned_tos else 0,
+    }
+
+
+def render_phl_plan_control(context: DailyHealthContext) -> None:
+    if context.phl_source and context.shipment_plan.empty:
+        st.caption("PHL Ships is connected, but no shipDate allocation tables are available in the app cache yet.")
+        return
+    if context.shipment_plan.empty:
+        return
+
+    summary = summarize_phl_shipment_plan(context.shipment_plan)
+    st.markdown('<div class="gp-section-label">PHL Ships Plan vs OB Tracker</div>', unsafe_allow_html=True)
+    render_enterprise_kpi_grid(
+        [
+            {
+                "label": "Planned TOs",
+                "value": format_number(summary["planned_tos"]),
+                "delta": f"{format_number(summary['planned_pallets'])} pallets",
+                "accent": "neutral",
+            },
+            {
+                "label": "Plan Loaded",
+                "value": format_percent(summary["completion"]),
+                "delta": f"{format_number(summary['loaded'])} loaded",
+                "accent": "green" if float(summary["completion"]) >= 0.9 else "yellow",
+            },
+            {
+                "label": "Missing in OB",
+                "value": format_number(summary["missing"]),
+                "delta": "Planned but not tracked",
+                "accent": "red" if int(summary["missing"]) else "green",
+            },
+            {
+                "label": "Date Mismatch",
+                "value": format_number(summary["mismatch"]),
+                "delta": "Ship date vs planned ship date",
+                "accent": "yellow" if int(summary["mismatch"]) else "green",
+            },
+        ],
+        columns=4,
+    )
+
+    route_summary = (
+        context.shipment_plan.groupby(["Carrier", "_route_key"], dropna=False)
+        .agg(
+            Planned_TOs=("TO Number", "nunique"),
+            Planned_Pallets=("Pallets Final", "sum"),
+            Planned_Weight=("Total Weight", "sum"),
+            Missing_in_OB=("Plan Match Status", lambda s: int(s.eq("Missing in OB").sum())),
+            Date_Mismatches=("Plan Match Status", lambda s: int(s.eq("Date Mismatch").sum())),
+            Late_TOs=("Plan Match Status", lambda s: int(s.eq("Late / At Risk").sum())),
+        )
+        .reset_index()
+    )
+    if not context.phl_totals.empty:
+        totals = context.phl_totals.sort_values("_source_tab_date").drop_duplicates("_route_key", keep="last")
+        route_summary = route_summary.merge(
+            totals[["_route_key", "Total Pallet Estimate", "Adhoc"]],
+            on="_route_key",
+            how="left",
+        )
+    route_summary["Route Alert"] = "Normal"
+    route_summary.loc[route_summary["Missing_in_OB"].gt(0), "Route Alert"] = "Missing in OB"
+    route_summary.loc[route_summary["Date_Mismatches"].gt(0), "Route Alert"] = "Date Mismatch"
+    route_summary.loc[route_summary["Late_TOs"].gt(0), "Route Alert"] = "Late / At Risk"
+    if "Adhoc" in route_summary.columns:
+        route_summary.loc[route_summary["Adhoc"].astype(str).str.contains("overflow", case=False, na=False), "Route Alert"] = "Overflow"
+        route_summary.loc[route_summary["Adhoc"].astype(str).str.contains("capacity", case=False, na=False), "Route Alert"] = "At Capacity"
+
+    chart = route_summary.sort_values("Planned_Pallets", ascending=True)
+    fig = px.bar(
+        chart,
+        x="Planned_Pallets",
+        y="Carrier",
+        orientation="h",
+        color="Route Alert",
+        text="Planned_Pallets",
+        color_discrete_map={
+            "Normal": "#2e7d32",
+            "At Capacity": "#f9a825",
+            "Overflow": "#c62828",
+            "Missing in OB": "#c62828",
+            "Date Mismatch": "#f9a825",
+            "Late / At Risk": "#c62828",
+        },
+        labels={"Planned_Pallets": "Planned Pallets", "Carrier": ""},
+    )
+    fig.update_traces(texttemplate="%{text:.0f}", textposition="outside", cliponaxis=False)
+    fig.update_layout(height=max(300, 34 * len(chart)), margin=dict(l=10, r=80, t=10, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+    issue_rows = context.shipment_plan[
+        context.shipment_plan["Plan Match Status"].isin(["Missing in OB", "Date Mismatch", "Late / At Risk"])
+    ].copy()
+    if issue_rows.empty:
+        st.success("PHL Ships plan is currently aligned to the OB Tracker for the cached shipDate tabs.")
+    else:
+        issue_cols = [
+            "Carrier",
+            "TO Number",
+            "goPuff Site Location",
+            "Ship Date",
+            "Delivery Date",
+            "OB Planned Ship Date",
+            "OB Status",
+            "Plan Match Status",
+            "Pallets Final",
+            "_source_tab",
+        ]
+        issue_display = issue_rows[[col for col in issue_cols if col in issue_rows.columns]].copy()
+        st.dataframe(issue_display.head(40), use_container_width=True, hide_index=True)
 
 
 def render_executive_note_embed(context: DailyHealthContext, health: HealthResult, ops_data: dict[str, pd.DataFrame]) -> None:
@@ -8353,6 +8820,10 @@ def render_embed_transportation_control(context: DailyHealthContext) -> None:
         "Window Status",
         "Load Ready Time",
         "Departure Time",
+        "Planned_TOs",
+        "Planned_Pallets",
+        "Missing_in_OB",
+        "Date_Mismatches",
         "TOs",
         "Loaded",
         "Open TOs",
@@ -8371,6 +8842,7 @@ def render_embed_transportation_control(context: DailyHealthContext) -> None:
             "Progress %": st.column_config.ProgressColumn("Progress %", format="%.0f%%", min_value=0, max_value=1),
         },
     )
+    render_phl_plan_control(context)
 
 
 def render_google_sites_embed(embed_mode: str) -> None:

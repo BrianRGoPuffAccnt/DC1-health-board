@@ -71,7 +71,9 @@ notes = "Standard Departure Times"
 source_url = "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
 ```
 
-On first hosted run, those secret-defined sheet URLs are synced into the app cache. The scheduled refresh then updates them at the 4 AM / 4 PM slots while the app is awake.
+On first hosted run, those secret-defined sheet URLs are synced into the app cache. The app checks every 5 minutes while awake, runs full connected-sheet refreshes at the scheduled full-refresh slots, and refreshes live operating sheets hourly from 5 AM through 11 PM.
+
+For the Google Sites embedded operating views, add `PHL Ships` as a connected Google Sheet. The app reads tabs named like `7/16 shipDate`, detects the `Alloc`, `Totals`, and `SDT` tables by their headers, then compares `PHL Ships` ship dates against the OB Tracker planned ship date by `TO Number`.
 
 For Google Sites, embed the deployed Streamlit URL. Use direct query URLs for specific page modules, for example:
 
@@ -257,6 +259,7 @@ The Flowchart Builder stores structured nodes and connections with warehouse-ori
 The Reference Sheets view is a staging area for shared Google Sheet exports and other workbook references. Upload reference workbooks from the sidebar, then tag them as:
 
 - Carrier Mapping
+- PHL Ships
 - Rates
 - Schedules
 - Allocation History

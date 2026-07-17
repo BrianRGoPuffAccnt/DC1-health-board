@@ -64,6 +64,7 @@ Supported sheet tags:
 - `OB TO Tracker`
 - `Fill Rate`
 - `Carrier Mapping`
+- `PHL Ships`
 - `Core-Mark`
 - `Other`
 
@@ -119,10 +120,22 @@ or for an existing query string:
 
 ## Scheduled Refresh
 
-The app checks every 15 minutes while the Streamlit process is awake and refreshes connected sheets once after each slot:
+The app checks every 5 minutes while the Streamlit process is awake.
+
+Full refresh runs for all connected sheets once after each slot:
 
 - 4:00 AM
-- 4:00 PM
+- 5:00 AM
+- 9:00 AM
+- 1:00 PM
+- 5:00 PM
+- 9:00 PM
+
+Live refresh runs hourly from 5:00 AM through 11:00 PM for:
+
+- `OB TO Tracker`
+- `Fill Rate`
+- `PHL Ships`
 
 If the hosted process is asleep at the exact scheduled time, it refreshes on the next wake/page load after that slot.
 
