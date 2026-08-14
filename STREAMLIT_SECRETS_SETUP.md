@@ -59,12 +59,24 @@ scopes = [
 
 When `[google_oauth]` is present, the app uses it before `[gcp_service_account]`.
 
+## Decision Support Chat (Anthropic)
+
+Required for the Home > Decision Support Chat page. Create a key at [console.anthropic.com](https://console.anthropic.com/), then add:
+
+```toml
+[anthropic]
+api_key = "sk-ant-..."
+```
+
+Without this block, the page shows a "not configured" message instead of the chat.
+
 ## Final Checklist
 
 1. Fill `.streamlit/secrets.toml` locally.
 2. Share every connected Google Sheet with the service account email.
 3. If service account sharing is blocked, add `[google_oauth]` from a work-account token instead.
-4. Paste the full TOML into Streamlit Community Cloud > App settings > Secrets.
-5. Deploy or reboot the Streamlit app.
+4. Add `[anthropic]` if you want Decision Support Chat enabled.
+5. Paste the full TOML into Streamlit Community Cloud > App settings > Secrets.
+6. Deploy or reboot the Streamlit app.
 
 Never commit `.streamlit/secrets.toml`.

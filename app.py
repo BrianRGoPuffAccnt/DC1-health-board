@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import os
 import re
 import sqlite3
 from difflib import SequenceMatcher
@@ -20,6 +21,7 @@ import streamlit.components.v1 as components
 
 
 APP_TITLE = "DC1 Supply Chain Health Board"
+DECISION_SUPPORT_MODEL = "claude-sonnet-5"
 _EASTERN = ZoneInfo("America/New_York")
 
 
@@ -181,7 +183,7 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive.activity.readonly",
 ]
 NAVIGATION = {
-    "Home": ["Executive Overview", "Live Update", "Executive Briefs", "Leadership Brief", "Reports"],
+    "Home": ["Executive Overview", "Live Update", "Executive Briefs", "Leadership Brief", "Decision Support Chat", "Reports"],
     "Transportation": [
         "Ship Allocation Builder",
         "Schedule Sync",
@@ -4134,6 +4136,155 @@ def make_executive_daily_brief(context: DailyHealthContext, health: HealthResult
     )
 
 
+def dataframe_to_markdown_table(df: pd.DataFrame, columns: list[str], max_rows: int) -> str:
+    """Compact pipe-delimited markdown table, capped at max_rows with a truncation note."""
+    available = [col for col in columns if col in df.columns]
+    if df.empty or not available:
+        return "(no rows)"
+    trimmed = df[available].fillna("").astype(str).head(max_rows)
+    header = "| " + " | ".join(available) + " |"
+    divider = "| " + " | ".join("---" for _ in available) + " |"
+    rows = ["| " + " | ".join(row) + " |" for row in trimmed.itertuples(index=False)]
+    table = "\n".join([header, divider, *rows])
+    if len(df) > max_rows:
+        table += f"\n\n...truncated, showing {max_rows} of {len(df)} total rows."
+    return table
+
+
+def build_decision_support_mfc_profile() -> pd.DataFrame:
+    """Lightweight MFC profile (lane/site/GUSTO/status) for the Decision Support Chat context.
+    Reuses the same Training Cheat Sheet + operating-context enrichment as Market Profiles,
+    without the full multi-source merge cascade that page renders for display."""
+    training = latest_google_sheet_by_type("Carrier Mapping")
+    if training is None:
+        return pd.DataFrame()
+    final_mile = read_google_sheet_named_table(training, "Outbound - Final Mile")
+    if final_mile.empty:
+        return pd.DataFrame()
+    lane_col = first_matching_column(final_mile, [["lane"]])
+    location_col = first_matching_column(final_mile, [["location", "name"]])
+    location_id_col = first_matching_column(final_mile, [["location", "id"]])
+    delivery_day_col = first_matching_column(final_mile, [["delivery", "day"]])
+    delivery_window_col = first_matching_column(final_mile, [["delivery", "window"]])
+
+    profile = pd.DataFrame(index=final_mile.index)
+    profile["Lane"] = final_mile[lane_col].astype(str).str.strip() if lane_col else ""
+    profile["Location Name"] = final_mile[location_col].astype(str).str.strip() if location_col else ""
+    profile["Site"] = profile["Location Name"].map(format_mfc_site_label)
+    profile["Location ID"] = final_mile[location_id_col].astype(str).str.strip() if location_id_col else ""
+    profile["Delivery Day"] = final_mile[delivery_day_col].astype(str).str.strip() if delivery_day_col else ""
+    profile["Delivery Window"] = final_mile[delivery_window_col].astype(str).str.strip() if delivery_window_col else ""
+    profile = profile[profile["Location Name"].str.strip().ne("")].drop_duplicates("Location Name")
+
+    enriched, _ = enrich_market_profile_operating_context(profile)
+    return enriched
+
+
+def build_decision_support_context(context: DailyHealthContext, health: HealthResult, ops_data: dict[str, pd.DataFrame]) -> str:
+    """Bounded-size text payload grounding the Decision Support Chat in live DC1 data.
+    Reuses existing summary/enrichment functions rather than re-reading raw sheets."""
+    sections = [
+        "=== Executive Brief ===",
+        make_executive_daily_brief(context, health, ops_data),
+    ]
+
+    if not context.progress.empty:
+        progress_cols = [
+            "Carrier", "SDT Day", "Departure Time", "Open TOs", "Rollover",
+            "Units", "Pallets", "Progress %", "Timing Risk", "Window Status",
+        ]
+        sections.append("=== Carrier Route Progress (per SDT/OB Tracker) ===")
+        sections.append(dataframe_to_markdown_table(context.progress, progress_cols, 150))
+
+    try:
+        mfc_profile = build_decision_support_mfc_profile()
+    except Exception:
+        mfc_profile = pd.DataFrame()
+    if not mfc_profile.empty:
+        profile_cols = [
+            "Site", "Lane", "Delivery Day", "Delivery Window",
+            "Active GUSTO", "Active Status", "SCBP", "Hypercare Status",
+        ]
+        sections.append("=== MFC Profiles (Training Cheat Sheet + operating context) ===")
+        sections.append(dataframe_to_markdown_table(mfc_profile, profile_cols, 150))
+
+    return "\n\n".join(sections)
+
+
+def render_decision_support_chat(context: DailyHealthContext, health: HealthResult, ops_data: dict[str, pd.DataFrame]) -> None:
+    lib_ready, lib_message = anthropic_library_available()
+    api_key = anthropic_api_key_secret() if lib_ready else None
+    configured = lib_ready and bool(api_key)
+
+    render_enterprise_module_header(
+        "Home",
+        "Decision Support Chat",
+        "Ask about open TOs, MFC profiles, carrier assignments, GUSTO status, and SDT windows. Read-only — this assistant cannot send messages or take action.",
+        "Green" if configured else "Yellow",
+        f"Model: {DECISION_SUPPORT_MODEL}" if configured else "Not configured",
+    )
+
+    if not lib_ready:
+        st.info(lib_message)
+        return
+    if not api_key:
+        st.info(
+            "Decision Support Chat needs an Anthropic API key. Add it to `.streamlit/secrets.toml` locally "
+            "(or Streamlit Cloud › App settings › Secrets) as:\n\n"
+            '```\n[anthropic]\napi_key = "your-anthropic-api-key"\n```'
+        )
+        return
+
+    import anthropic
+
+    if "decision_chat_messages" not in st.session_state:
+        st.session_state["decision_chat_messages"] = []
+
+    if st.button("Clear conversation", key="decision_chat_clear"):
+        st.session_state["decision_chat_messages"] = []
+        st.rerun()
+
+    for message in st.session_state["decision_chat_messages"]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    question = st.chat_input("Ask about open TOs, MFC profiles, carrier assignments, GUSTO status, or SDT windows...")
+    if not question:
+        return
+
+    st.session_state["decision_chat_messages"].append({"role": "user", "content": question})
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    system_prompt = (
+        "You are the Decision Support Chat for the Gopuff DC1 Supply Chain Health Board, a read-only assistant. "
+        "Answer only using the DC1 operating data provided below. If the data doesn't cover the question, say so "
+        "plainly rather than guessing. You cannot send messages, contact carriers, write to any spreadsheet, or "
+        "take any action — you can only describe what the current data shows. Keep answers concise and specific "
+        "(carrier names, GUSTO numbers, site names) when the data supports it.\n\n"
+        f"{build_decision_support_context(context, health, ops_data)}"
+    )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    with st.chat_message("assistant"):
+        try:
+            with client.messages.stream(
+                model=DECISION_SUPPORT_MODEL,
+                max_tokens=1024,
+                system=system_prompt,
+                messages=[
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state["decision_chat_messages"]
+                ],
+            ) as stream:
+                answer = st.write_stream(stream.text_stream)
+        except Exception as exc:
+            answer = f"Decision Support Chat couldn't reach Claude: {exc}"
+            st.error(answer)
+
+    st.session_state["decision_chat_messages"].append({"role": "assistant", "content": answer})
+
+
 def build_outstanding_site_readiness(context: DailyHealthContext) -> pd.DataFrame:
     if context.progress.empty or context.fill_rate.empty:
         return pd.DataFrame()
@@ -5027,6 +5178,25 @@ def google_oauth_secret() -> dict[str, object] | None:
     except Exception:
         return None
     return None
+
+
+def anthropic_library_available() -> tuple[bool, str]:
+    try:
+        import anthropic  # noqa: F401
+    except ImportError as exc:
+        return False, f"Missing anthropic Python library. Run pip install -r requirements.txt. Detail: {exc}"
+    return True, "Anthropic library is ready."
+
+
+def anthropic_api_key_secret() -> str | None:
+    try:
+        if "anthropic" in st.secrets:
+            key = dict(st.secrets["anthropic"]).get("api_key")
+            if key:
+                return str(key).strip()
+    except Exception:
+        pass
+    return os.environ.get("ANTHROPIC_API_KEY") or None
 
 
 def get_google_services():
@@ -9450,6 +9620,8 @@ def render_google_sites_embed(embed_mode: str) -> None:
         render_executive_note_embed(context, health, ops_data)
     elif embed_mode in {"market_profiles", "mfc_lookup", "mfc_profiles", "mfc_network_map", "resource_library"}:
         render_market_profiles()
+    elif embed_mode in {"decision_support_chat", "decision_chat", "decision_support", "decision_support_canvas", "claude_chat"}:
+        render_decision_support_chat(context, health, ops_data)
     elif embed_mode in {"about", "user_guide", "guide", "help"}:
         render_about_guide()
     else:
@@ -10349,6 +10521,9 @@ def main() -> None:
 
     if view == "Executive Briefs":
         render_executive_briefs_view(daily_health_context or load_daily_health_context(), health, ops_data)
+
+    if view == "Decision Support Chat":
+        render_decision_support_chat(daily_health_context or load_daily_health_context(), health, ops_data)
 
     if view == "MFC Site Map":
         render_mfc_site_map(ship_allocation_records)

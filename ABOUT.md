@@ -74,8 +74,8 @@ Tracks LEAN and 5S projects underway at DC1 — project status, owners, current/
 ### Signal Notifications *(coming soon)*
 Will scan carrier and ops Slack channels for operational signals — late GUSTOs, carrier delays, escalations — and surface them here with enriched context and action links.
 
-### Decision Support Chat *(coming soon)*
-A Claude-powered assistant that can answer questions against live dashboard data: open TO counts, MFC profiles, carrier assignments, GUSTO status, and SDT windows.
+### Decision Support Chat
+A Claude-powered assistant (Home section) that answers questions against live DC1 data: carrier route progress and open TOs, MFC profiles, carrier/SCBP assignments, GUSTO status, and delivery windows. Strictly read-only — it cannot send messages, write to any spreadsheet, or take action, only describe what the current data shows.
 
 ---
 
