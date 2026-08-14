@@ -232,6 +232,8 @@ EMBED_TARGETS = {
     "signal_center": "Signal Notifications",
     "decision_support_chat": "Decision Support Chat",
     "decision_chat": "Decision Support Chat",
+    "decision_support": "Decision Support Chat",
+    "decision_support_canvas": "Decision Support Chat",
     "claude_chat": "Decision Support Chat",
     "resource_library": "Resource Library Profiles",
     "about": "About / User Guide",
