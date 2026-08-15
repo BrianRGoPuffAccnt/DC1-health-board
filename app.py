@@ -41,7 +41,7 @@ GOOGLE_REFRESH_SCHEDULE_HOURS = [4, 5, 9, 13, 17, 21]
 # Live refresh (OB Tracker + Fill Rate + PHL Ships only) runs every hour from 5 AM through 11 PM.
 GOOGLE_LIVE_REFRESH_HOURS = list(range(5, 24))
 GOOGLE_LIVE_SHEET_TYPES = ["OB TO Tracker", "Fill Rate", "PHL Ships"]
-AUTO_REFRESH_CHECK_MINUTES = 5
+AUTO_REFRESH_CHECK_MINUTES = 20
 STATUS_OPTIONS = ["Not Tendered", "Tendered", "Confirmed", "At Risk", "Escalated"]
 LEAN_MATRIX_COLUMNS = ["area", "owner", "deadline", "status", "notes"]
 LEAN_MATRIX_STATUS_OPTIONS = ["Not Started", "In Progress", "Blocked", "Complete", "Sustained"]
@@ -4197,7 +4197,7 @@ def build_decision_support_context(context: DailyHealthContext, health: HealthRe
             "Units", "Pallets", "Progress %", "Timing Risk", "Window Status",
         ]
         sections.append("=== Carrier Route Progress (per SDT/OB Tracker) ===")
-        sections.append(dataframe_to_markdown_table(context.progress, progress_cols, 150))
+        sections.append(dataframe_to_markdown_table(context.progress, progress_cols, 500))
 
     try:
         mfc_profile = build_decision_support_mfc_profile()
@@ -4205,11 +4205,11 @@ def build_decision_support_context(context: DailyHealthContext, health: HealthRe
         mfc_profile = pd.DataFrame()
     if not mfc_profile.empty:
         profile_cols = [
-            "Site", "Lane", "Delivery Day", "Delivery Window",
+            "Site", "Location ID", "Lane", "Delivery Day", "Delivery Window",
             "Active GUSTO", "Active Status", "SCBP", "Hypercare Status",
         ]
-        sections.append("=== MFC Profiles (Training Cheat Sheet + operating context) ===")
-        sections.append(dataframe_to_markdown_table(mfc_profile, profile_cols, 150))
+        sections.append("=== MFC Profiles (Training Cheat Sheet + operating context) — lookup by Site label or Location ID ===")
+        sections.append(dataframe_to_markdown_table(mfc_profile, profile_cols, 1000))
 
     return "\n\n".join(sections)
 
@@ -9274,9 +9274,14 @@ def render_market_profile_detail(
 
 
 def render_market_profiles() -> None:
-    st.subheader("Market Profiles")
-    st.caption("Lookup profiles from the Training Cheat Sheet: MFC/site, lane, final-mile, linehaul, carrier owner, SCBP, and delivery window context.")
     training = latest_google_sheet_by_type("Carrier Mapping")
+    render_enterprise_module_header(
+        "Operations",
+        "Market Profiles",
+        "Lookup profiles from the Training Cheat Sheet: MFC/site, lane, final-mile, linehaul, carrier owner, SCBP, and delivery window context.",
+        "Green" if training is not None else "Yellow",
+        f"Source: {training['name']}" if training is not None else "Not connected",
+    )
     if training is None:
         st.info("Connect the Training Cheat Sheet as a Carrier Mapping Google Sheet to populate market profiles.")
         return
@@ -9617,7 +9622,11 @@ def render_ob_tracker_embed(context: DailyHealthContext) -> None:
 
 def render_google_sites_embed(embed_mode: str) -> None:
     st.markdown('<div class="gp-embed-shell">', unsafe_allow_html=True)
-    install_google_refresh_timer()
+    # Chat pages carry conversation state in st.session_state — a hard page reload
+    # wipes it. Every other embed is a passive dashboard with nothing to lose, so
+    # the timer stays on for those.
+    if embed_mode not in {"decision_support_chat", "decision_chat", "decision_support", "decision_support_canvas", "claude_chat"}:
+        install_google_refresh_timer()
     if "google_sheet_secret_seed_checked" not in st.session_state:
         seed_google_sheet_connections_from_secrets()
         st.session_state["google_sheet_secret_seed_checked"] = True
@@ -10184,7 +10193,11 @@ def main() -> None:
     render_brand_header()
     st.title(APP_TITLE)
     st.caption("Local MVP for DC1 allocation visibility, Command Center snapshots, and executive health checks.")
-    install_google_refresh_timer()
+    # Chat pages carry conversation state in st.session_state — a hard page reload
+    # wipes it, so skip the timer while the current/last-known view is the chat.
+    current_view_hint = get_query_param("view") or st.session_state.get("main_view", "")
+    if current_view_hint != "Decision Support Chat":
+        install_google_refresh_timer()
     if "google_sheet_secret_seed_checked" not in st.session_state:
         seed_messages = seed_google_sheet_connections_from_secrets()
         st.session_state["google_sheet_secret_seed_checked"] = True
