@@ -96,8 +96,7 @@ See `STREAMLIT_DEPLOYMENT.md` for the full deployment checklist.
 5. Review the BulkUpload validation summary.
 6. Download the Uber Freight BulkUpload XLSX only after the ready/review counts make sense.
 7. Add optional run notes and save the generated BulkUpload to SQLite.
-8. Use `Home > Executive Overview` for the Data Inputs Health panel and copy-ready executive snapshot.
-9. Use `Home > Reports` to download a SQLite backup before moving machines or sharing the prototype.
+8. Use `Home > Reports` to download a SQLite backup before moving machines or sharing the prototype.
 
 ## Command Center Snapshots
 
@@ -111,7 +110,7 @@ Useful columns include:
 - DT > 60m
 - Time, Date, Timestamp, Updated, or Last Updated
 
-Each detected row is saved to SQLite with the source file and sheet. The Executive Overview uses the latest saved snapshot while preserving previous readings for trend review. Manual entries can also be saved from the sidebar expander.
+Each detected row is saved to SQLite with the source file and sheet, preserving previous readings for trend review. This path is disabled while Live Google Sheet mode (`LIVE_GOOGLE_ONLY`) is on — Executive Briefs sources its numbers from the live PHL Ships/OB Tracker/Fill Rate connections instead. Manual entries can still be saved from the sidebar expander as a fallback if the live pipeline is down.
 
 ## Brand layer
 

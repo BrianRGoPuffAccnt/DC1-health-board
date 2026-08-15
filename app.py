@@ -183,7 +183,7 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive.activity.readonly",
 ]
 NAVIGATION = {
-    "Home": ["Executive Overview", "Live Update", "Executive Briefs", "Leadership Brief", "Decision Support Chat", "Reports"],
+    "Home": ["Live Update", "Executive Briefs", "Leadership Brief", "Decision Support Chat", "Reports"],
     "Transportation": [
         "Ship Allocation Builder",
         "Schedule Sync",
@@ -1916,6 +1916,15 @@ def previous_working_day(day: datetime | pd.Timestamp | None = None) -> pd.Times
     while previous.weekday() >= 5:
         previous -= pd.Timedelta(days=1)
     return previous
+
+
+def next_operational_day(day: datetime | pd.Timestamp | None = None) -> pd.Timestamp:
+    """Today if it's a weekday, otherwise the next upcoming weekday — DC1 doesn't run
+    weekend shipDate plans, so 'today' on a Saturday should mean the next open day."""
+    current = pd.Timestamp(day or now_eastern()).normalize()
+    while current.weekday() >= 5:
+        current += pd.Timedelta(days=1)
+    return current
 
 
 def date_sheet_name(day: pd.Timestamp) -> str:
@@ -4582,62 +4591,93 @@ def render_live_update(context: DailyHealthContext) -> None:
     render_brief_panel("Copy-ready live briefing feed", make_live_update_note(context))
 
 
+def render_operational_day_panel(context: DailyHealthContext, label: str, target_day: pd.Timestamp, allow_pending: bool) -> None:
+    """KPI panel scoped to one specific operating day. Distinguishes a 'Pending' day (the
+    PHL Ships shipDate tab for that date hasn't synced yet — data feed hasn't caught up)
+    from a confirmed day with genuinely nothing outstanding, so a non-operational or
+    not-yet-loaded day never reads as a false all-zero result."""
+    ship_plan, ship_label = scoped_shipment_plan(context.shipment_plan, "ship_today", target_day)
+    pick_plan, pick_label = scoped_shipment_plan(context.shipment_plan, "pick_today", target_day)
+    ship_totals = scoped_phl_totals(context.phl_totals, target_day)
+    tab_loaded = any(
+        (parsed := parse_shipdate_sheet_name(sheet)) is not None and parsed.normalize() == target_day.normalize()
+        for sheet in context.phl_sheets
+    )
+
+    st.markdown(
+        f'<div class="gp-section-label">{html.escape(label)} — {target_day.strftime("%A %m/%d/%Y")}</div>',
+        unsafe_allow_html=True,
+    )
+
+    if ship_plan.empty and allow_pending and not tab_loaded:
+        st.info(
+            f"Pending — the PHL Ships shipDate tab for {target_day.strftime('%m/%d/%Y')} hasn't synced yet. "
+            "This isn't confirmed zero; check back after the next scheduled refresh."
+        )
+        return
+    if ship_plan.empty:
+        st.caption(f"No PHL Ships plan found for {target_day.strftime('%m/%d/%Y')}.")
+        return
+
+    plan_summary = summarize_phl_shipment_plan(ship_plan)
+    overflows = overflow_summary(ship_totals)
+    overflow_count = int(overflows["Overflow Status"].eq("Overflow").sum()) if not overflows.empty else 0
+    units_nyp = int(pd.to_numeric(pick_plan.get("Units_NYP", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not pick_plan.empty else 0
+    render_enterprise_kpi_grid(
+        [
+            {
+                "label": "Loaded",
+                "value": f"{format_number(plan_summary['loaded'])} / {format_number(plan_summary['planned_tos'])}",
+                "delta": ship_label,
+                "accent": "green" if float(plan_summary["completion"]) >= 0.9 else "yellow",
+            },
+            {"label": "Open Ship TOs", "value": format_number(plan_summary["open"]), "delta": "ship-date plan", "accent": "yellow" if int(plan_summary["open"]) else "green"},
+            {
+                "label": "Missing / Mismatch",
+                "value": f"{format_number(plan_summary['missing'])} / {format_number(plan_summary['mismatch'])}",
+                "delta": "PHL vs OB",
+                "accent": "red" if int(plan_summary["missing"]) else "yellow" if int(plan_summary["mismatch"]) else "green",
+            },
+            {"label": "Pick-Date NYP", "value": format_number(units_nyp), "delta": pick_label, "accent": "yellow" if units_nyp else "green"},
+            {"label": "Overflow Lanes", "value": format_number(overflow_count), "delta": ">30 pallets or >45k lbs", "accent": "red" if overflow_count else "green"},
+        ],
+        columns=5,
+    )
+
+
 def render_executive_briefs_view(context: DailyHealthContext, health: HealthResult, ops_data: dict[str, pd.DataFrame]) -> None:
     brief = make_executive_daily_brief(context, health, ops_data)
-    ship_plan, ship_label = scoped_shipment_plan(context.shipment_plan, "ship_today")
-    pick_plan, pick_label = scoped_shipment_plan(context.shipment_plan, "pick_today")
-    ship_totals = scoped_phl_totals(context.phl_totals)
+    previous_day = previous_working_day()
+    current_day = next_operational_day()
     status = health.label
     if not context.progress.empty:
         status = str(summarize_daily_health_progress(context.progress)["status"])
-    if not ship_plan.empty:
-        plan_summary = summarize_phl_shipment_plan(ship_plan)
-        if int(plan_summary["missing"]) or int(plan_summary["late"]):
-            status = "Red"
-        elif int(plan_summary["mismatch"]):
-            status = "Yellow"
     render_enterprise_module_header(
         "Executive Briefing Center",
         "DC1 Shipping Readiness Brief",
-        "Leadership summary of PHL Ships plan, OB execution, Fill Rate readiness, and overflow exposure.",
+        "Split by operating day — previous close and the current/next open day — so a "
+        "non-operational day or a not-yet-synced feed never reads as a data gap.",
         status,
-        f"{ship_label} | {pick_label} | Prepared {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
+        f"Prepared {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
 
     if context.progress.empty and context.shipment_plan.empty:
         st.info("Daily Executive Summary will populate after PHL Ships, SDT Schedule, OB TO Tracker, and Fill Rate are connected or refreshed.")
     else:
-        summary = summarize_daily_health_progress(context.progress) if not context.progress.empty else {
-            "status": status,
-            "completion": 0,
-            "loaded": 0,
-            "open_tos": 0,
-            "units_nyp": 0,
-            "po_without_pallets": 0,
-        }
-        plan_summary = summarize_phl_shipment_plan(ship_plan)
-        overflows = overflow_summary(ship_totals)
-        overflow_count = int(overflows["Overflow Status"].eq("Overflow").sum()) if not overflows.empty else 0
-        units_nyp = int(pd.to_numeric(pick_plan.get("Units_NYP", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not pick_plan.empty else int(summary["units_nyp"])
-        render_enterprise_kpi_grid(
-            [
-                {"label": "Shipping Health", "value": status, "delta": "Executive status", "accent": status},
-                {"label": "Loaded Today", "value": f"{format_number(plan_summary['loaded'])} / {format_number(plan_summary['planned_tos'])}", "delta": ship_label, "accent": "green" if float(plan_summary["completion"]) >= 0.9 else "yellow"},
-                {"label": "Open Ship TOs", "value": format_number(plan_summary["open"]), "delta": "today's ship-date plan", "accent": "yellow" if int(plan_summary["open"]) else "green"},
-                {"label": "Missing / Mismatch", "value": f"{format_number(plan_summary['missing'])} / {format_number(plan_summary['mismatch'])}", "delta": "PHL vs OB", "accent": "red" if int(plan_summary["missing"]) else "yellow" if int(plan_summary["mismatch"]) else "green"},
-                {"label": "Pick-Date NYP", "value": format_number(units_nyp), "delta": pick_label, "accent": "yellow" if units_nyp else "green"},
-                {"label": "Overflow Lanes", "value": format_number(overflow_count), "delta": ">30 pallets or >45k lbs", "accent": "red" if overflow_count else "green"},
-            ],
-            columns=6,
-        )
+        day_cols = st.columns(2)
+        with day_cols[0]:
+            render_operational_day_panel(context, "Previous Operational Day", previous_day, allow_pending=False)
+        with day_cols[1]:
+            render_operational_day_panel(context, "Current Operational Day", current_day, allow_pending=True)
 
         render_outstanding_site_blocks(context)
 
+        pick_plan, _ = scoped_shipment_plan(context.shipment_plan, "pick_today", current_day)
         chart_cols = st.columns([1, 1])
         with chart_cols[0]:
             readiness_cols = [col for col in ["Carrier", "Planned_TOs", "Plan_Loaded", "Plan_Open", "Missing_in_OB", "Date_Mismatches", "Late_TOs", "Overflow Status"] if col in context.progress.columns]
             st.markdown('<div class="gp-section-label">On-Time Shipping Readiness</div>', unsafe_allow_html=True)
-            readiness_display = context.progress[readiness_cols] if readiness_cols else plan_lane_readiness(ship_plan)
+            readiness_display = context.progress[readiness_cols] if readiness_cols else plan_lane_readiness(context.shipment_plan)
             if "Plan_Open" in readiness_display.columns:
                 readiness_display = readiness_display.sort_values("Plan_Open", ascending=False)
             elif "Open TOs" in readiness_display.columns:
@@ -4660,6 +4700,17 @@ def render_executive_briefs_view(context: DailyHealthContext, health: HealthResu
                 )
             else:
                 st.caption("Fill Rate source is not matched yet.")
+
+    signal_rows = pd.DataFrame(st.session_state.get("carrier_signals", []))
+    if not signal_rows.empty:
+        active_signals = signal_rows[signal_rows["Status"].isin(["Open", "Escalated"])]
+        if not active_signals.empty:
+            st.markdown('<div class="gp-section-label">Carrier Signal Watchlist</div>', unsafe_allow_html=True)
+            st.dataframe(
+                active_signals[["Carrier", "Channel", "Signal Type", "Urgency", "Status", "Possible Site IDs", "Suggested Action"]],
+                use_container_width=True,
+                hide_index=True,
+            )
 
     render_brief_panel("Copy-ready executive brief", brief)
 
@@ -7061,24 +7112,6 @@ def summarize_otp(otp_bridge: pd.DataFrame) -> pd.DataFrame:
         }
     )
     return summary.sort_values(["OTP %", "Shipments"], ascending=[True, False])
-
-
-def render_status_badge(label: str) -> None:
-    colors = {
-        "Green": ("#1f7a4d", "#e8f5ef"),
-        "Yellow": ("#946200", "#fff5cc"),
-        "Red": ("#a12d2d", "#fde8e8"),
-    }
-    fg, bg = colors[label]
-    st.markdown(
-        f"""
-        <div style="background:{bg};border:1px solid {fg};border-radius:8px;padding:16px 18px;">
-          <div style="font-size:14px;color:{fg};font-weight:700;">Overall Health</div>
-          <div style="font-size:42px;color:{fg};font-weight:800;line-height:1;">{label}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 def render_saved_file_library(category: str, empty_message: str) -> None:
@@ -9806,43 +9839,6 @@ def render_cost_lane_intelligence() -> None:
         st.dataframe(preview[display_cols].head(100) if display_cols else preview.head(100), use_container_width=True, hide_index=True)
 
 
-def make_executive_snapshot(
-    health: HealthResult,
-    command_center: dict[str, int],
-    carrier_summary: pd.DataFrame,
-    site_summary: pd.DataFrame,
-    ship_allocation_records: pd.DataFrame,
-) -> str:
-    total_orders = len(site_summary)
-    total_pallets = site_summary.get("Pallets Final", pd.Series(dtype=float)).sum()
-    top_carriers = "No carrier volume loaded."
-    if not carrier_summary.empty and "Total Pallet Estimate" in carrier_summary.columns:
-        top = carrier_summary.sort_values("Total Pallet Estimate", ascending=False).head(3)
-        top_carriers = "; ".join(
-            f"{row['Carrier']} ({format_number(row['Total Pallet Estimate'])} pallets)"
-            for _, row in top.iterrows()
-        )
-
-    source_files = "No daily allocation file loaded."
-    if not ship_allocation_records.empty and "source_file" in ship_allocation_records.columns:
-        source_files = ", ".join(
-            ship_allocation_records["source_file"].dropna().astype(str).drop_duplicates().head(5).tolist()
-        )
-
-    drivers = " ".join(health.drivers)
-    return (
-        f"DC1 Executive Snapshot | {command_center.get('last_updated', 'not provided')}\n\n"
-        f"Overall Status: {health.label}\n"
-        f"Demand: {command_center.get('created', 0):,} created orders; "
-        f"{command_center.get('created_vs_forecast', 0):+,} vs forecast; "
-        f"DT > 60m at {command_center.get('dt_over_60', 0):,}.\n"
-        f"Allocation Load: {total_orders:,} order row(s), {format_number(total_pallets)} pallet(s). Source: {source_files}.\n"
-        f"Top Carrier Volume: {top_carriers}.\n"
-        f"Primary Drivers: {drivers}\n\n"
-        "Next Action: validate BulkUpload readiness, confirm carrier constraints, and resolve any rows marked Needs Review before TMS upload."
-    )
-
-
 def render_database_backup() -> None:
     st.subheader("Prototype Backup")
     st.caption("Downloads the current local SQLite database so saved batches, signals, files, and reference metadata can be backed up before sharing or moving machines.")
@@ -10451,119 +10447,6 @@ def main() -> None:
     st.session_state["main_view"] = view
     active_section, view = render_navigation_menu(active_section, view)
     daily_health_context = load_daily_health_context() if view in {"Live Update", "Executive Briefs"} else None
-
-    if view == "Executive Overview":
-        col_status, col_demand, col_transport, col_lead = st.columns([1.1, 1, 1, 1])
-
-        with col_status:
-            render_status_badge(health.label)
-
-        with col_demand:
-            st.metric("Created", format_number(command_center["created"]), f"{command_center['created_vs_forecast']:+,} vs forecast")
-            st.metric("Cancelled", format_number(command_center["cancelled"]))
-
-        with col_transport:
-            st.metric("Orders", format_number(len(site_summary)))
-            st.metric("Pallets", format_number(site_summary.get("Pallets Final", pd.Series(dtype=float)).sum()))
-
-        with col_lead:
-            st.metric("DT > 50m", format_number(command_center["dt_over_50"]))
-            st.metric("DT > 60m", format_number(command_center["dt_over_60"]))
-
-        render_data_input_health(ship_allocation_records, otp_bridge, ops_data)
-
-        with st.expander("Copy-Ready Executive Snapshot", expanded=False):
-            snapshot_text = make_executive_snapshot(
-                health,
-                command_center,
-                carrier_summary,
-                site_summary,
-                ship_allocation_records,
-            )
-            st.text_area("Snapshot text", value=snapshot_text, height=240)
-
-        command_history = list_command_center_snapshots(limit=250)
-        if not command_history.empty:
-            with st.expander("Command Center Snapshot History", expanded=False):
-                st.dataframe(command_history, use_container_width=True, hide_index=True)
-                chart_history = command_history.copy()
-                chart_history["snapshot_time"] = pd.to_datetime(chart_history["snapshot_time"], errors="coerce")
-                chart_history = chart_history.dropna(subset=["snapshot_time"]).sort_values("snapshot_time")
-                if len(chart_history) > 1:
-                    trend_cols = ["created", "cancelled", "dt_over_50", "dt_over_60"]
-                    trend = chart_history.melt(
-                        id_vars=["snapshot_time"],
-                        value_vars=trend_cols,
-                        var_name="Metric",
-                        value_name="Value",
-                    )
-                    fig = px.line(trend, x="snapshot_time", y="Value", color="Metric", markers=True)
-                    fig.update_layout(height=360, margin=dict(l=10, r=10, t=20, b=10))
-                    st.plotly_chart(fig, use_container_width=True)
-
-        ops_summary = summarize_ops_overall(ops_data)
-        if ops_summary.get("latest_date"):
-            st.subheader("Ops Productivity Snapshot")
-            ops_col_units, ops_col_hours, ops_col_uph, ops_col_bridge = st.columns(4)
-            ops_col_units.metric("Ops Units", format_number(ops_summary.get("latest_units")))
-            ops_col_hours.metric("Ops Hours", format_number(ops_summary.get("latest_hours")))
-            ops_col_uph.metric("Ops UPH", format_number(ops_summary.get("latest_uph")))
-            ops_col_bridge.metric("Ops Bridge Notes", format_number(ops_summary.get("bridge_count")))
-
-        st.subheader("Health Drivers")
-        for driver in health.drivers:
-            st.write(f"- {driver}")
-
-        signal_rows = pd.DataFrame(st.session_state.get("carrier_signals", []))
-        if not signal_rows.empty:
-            active_signals = signal_rows[signal_rows["Status"].isin(["Open", "Escalated"])]
-            if not active_signals.empty:
-                st.subheader("Carrier Signal Watchlist")
-                st.dataframe(
-                    active_signals[
-                        [
-                            "Carrier",
-                            "Channel",
-                            "Signal Type",
-                            "Urgency",
-                            "Status",
-                            "Possible Site IDs",
-                            "Suggested Action",
-                        ]
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-        if not carrier_summary.empty and "Carrier" in carrier_summary.columns:
-            st.subheader("Carrier Volume")
-            pallet_col = "Total Pallet Estimate"
-            if pallet_col in carrier_summary.columns:
-                chart_df = carrier_summary.sort_values(pallet_col, ascending=True)
-                fig = px.bar(
-                    chart_df,
-                    x=pallet_col,
-                    y="Carrier",
-                    orientation="h",
-                    color=pallet_col,
-                    color_continuous_scale="Tealgrn",
-                    text=pallet_col,
-                    labels={pallet_col: "Pallets"},
-                )
-                fig.update_traces(
-                    texttemplate="%{text:,.0f}",
-                    textposition="outside",
-                    textangle=-90,
-                    textfont=dict(size=18, color="#151922"),
-                    cliponaxis=False,
-                )
-                fig.update_layout(
-                    height=420,
-                    margin=dict(l=10, r=60, t=20, b=10),
-                    uniformtext=dict(minsize=18, mode="show"),
-                    xaxis=dict(range=[0, chart_df[pallet_col].max() * 1.18]),
-                )
-                st.plotly_chart(fig, use_container_width=True)
 
     if view == "Live Update":
         render_live_update(daily_health_context or load_daily_health_context())
