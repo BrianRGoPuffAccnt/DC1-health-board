@@ -4155,32 +4155,15 @@ def dataframe_to_markdown_table(df: pd.DataFrame, columns: list[str], max_rows: 
 
 
 def build_decision_support_mfc_profile() -> pd.DataFrame:
-    """Lightweight MFC profile (lane/site/GUSTO/status) for the Decision Support Chat context.
-    Reuses the same Training Cheat Sheet + operating-context enrichment as Market Profiles,
-    without the full multi-source merge cascade that page renders for display."""
+    """MFC profile for the Decision Support Chat context — calls the exact same
+    build_full_market_profile() the Market Profiles page renders from, so the chat can
+    never know less about a site than the lookup page shows (including MFCs that only
+    exist via Site Information additions, not the Training Cheat Sheet's Final Mile tab)."""
     training = latest_google_sheet_by_type("Carrier Mapping")
     if training is None:
         return pd.DataFrame()
-    final_mile = read_google_sheet_named_table(training, "Outbound - Final Mile")
-    if final_mile.empty:
-        return pd.DataFrame()
-    lane_col = first_matching_column(final_mile, [["lane"]])
-    location_col = first_matching_column(final_mile, [["location", "name"]])
-    location_id_col = first_matching_column(final_mile, [["location", "id"]])
-    delivery_day_col = first_matching_column(final_mile, [["delivery", "day"]])
-    delivery_window_col = first_matching_column(final_mile, [["delivery", "window"]])
-
-    profile = pd.DataFrame(index=final_mile.index)
-    profile["Lane"] = final_mile[lane_col].astype(str).str.strip() if lane_col else ""
-    profile["Location Name"] = final_mile[location_col].astype(str).str.strip() if location_col else ""
-    profile["Site"] = profile["Location Name"].map(format_mfc_site_label)
-    profile["Location ID"] = final_mile[location_id_col].astype(str).str.strip() if location_id_col else ""
-    profile["Delivery Day"] = final_mile[delivery_day_col].astype(str).str.strip() if delivery_day_col else ""
-    profile["Delivery Window"] = final_mile[delivery_window_col].astype(str).str.strip() if delivery_window_col else ""
-    profile = profile[profile["Location Name"].str.strip().ne("")].drop_duplicates("Location Name")
-
-    enriched, _ = enrich_market_profile_operating_context(profile)
-    return enriched
+    profile, _ = build_full_market_profile(training)
+    return profile
 
 
 def build_decision_support_context(context: DailyHealthContext, health: HealthResult, ops_data: dict[str, pd.DataFrame]) -> str:
@@ -4206,7 +4189,8 @@ def build_decision_support_context(context: DailyHealthContext, health: HealthRe
     if not mfc_profile.empty:
         profile_cols = [
             "Site", "Location ID", "Lane", "Delivery Day", "Delivery Window",
-            "Active GUSTO", "Active Status", "SCBP", "Hypercare Status",
+            "Active GUSTO", "Active Status", "SCBP", "Site Leader", "Regional Manager",
+            "Hypercare Status", "Current 3PL", "Full Address", "City", "State",
         ]
         sections.append("=== MFC Profiles (Training Cheat Sheet + operating context) — lookup by Site label or Location ID ===")
         sections.append(dataframe_to_markdown_table(mfc_profile, profile_cols, 1000))
@@ -9273,27 +9257,19 @@ def render_market_profile_detail(
         render_profile_source_fields(row, ["S&OP ", "Hypercare", "Site Info", "Active "])
 
 
-def render_market_profiles() -> None:
-    training = latest_google_sheet_by_type("Carrier Mapping")
-    render_enterprise_module_header(
-        "Operations",
-        "Market Profiles",
-        "Lookup profiles from the Training Cheat Sheet: MFC/site, lane, final-mile, linehaul, carrier owner, SCBP, and delivery window context.",
-        "Green" if training is not None else "Yellow",
-        f"Source: {training['name']}" if training is not None else "Not connected",
-    )
-    if training is None:
-        st.info("Connect the Training Cheat Sheet as a Carrier Mapping Google Sheet to populate market profiles.")
-        return
-
+def build_full_market_profile(training: pd.Series) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Full merged MFC profile: Training Cheat Sheet tabs, Site Information additions
+    (locations that exist only in Site Information, not Outbound - Final Mile), and live
+    operating context (allocation/GUSTO status, SCBP assignment, S&OP hypercare). This is
+    the single source of truth for MFC data — both the Market Profiles page and Decision
+    Support Chat call this, so the chat can never know less than the page shows."""
     final_mile = read_google_sheet_named_table(training, "Outbound - Final Mile")
     linehaul = read_google_sheet_named_table(training, "Outbound - Linehaul")
     market_breakdown = read_google_sheet_named_table(training, "Carrier Market Breakdown")
     scbps = read_google_sheet_named_table(training, "SCBPs")
     addresses = read_google_sheet_named_table(training, "Addresses and RM")
     if final_mile.empty:
-        st.info("Refresh the Training Cheat Sheet connection so Outbound - Final Mile is available in the live cache.")
-        return
+        return pd.DataFrame(), {}
 
     lane_col = first_matching_column(final_mile, [["lane"]])
     location_col = first_matching_column(final_mile, [["location", "name"]])
@@ -9408,6 +9384,28 @@ def render_market_profiles() -> None:
     site_information_profiles, _ = build_site_information_context()
     profile = append_site_information_profiles(profile, site_information_profiles)
     profile, operating_sources = enrich_market_profile_operating_context(profile)
+    return profile, operating_sources
+
+
+def render_market_profiles() -> None:
+    training = latest_google_sheet_by_type("Carrier Mapping")
+    render_enterprise_module_header(
+        "Operations",
+        "Market Profiles",
+        "Lookup profiles from the Training Cheat Sheet: MFC/site, lane, final-mile, linehaul, carrier owner, SCBP, and delivery window context.",
+        "Green" if training is not None else "Yellow",
+        f"Source: {training['name']}" if training is not None else "Not connected",
+    )
+    if training is None:
+        st.info("Connect the Training Cheat Sheet as a Carrier Mapping Google Sheet to populate market profiles.")
+        return
+
+    profile, operating_sources = build_full_market_profile(training)
+    if profile.empty:
+        st.info("Refresh the Training Cheat Sheet connection so Outbound - Final Mile is available in the live cache.")
+        return
+    linehaul = read_google_sheet_named_table(training, "Outbound - Linehaul")
+    market_breakdown = read_google_sheet_named_table(training, "Carrier Market Breakdown")
     if operating_sources:
         source_text = " | ".join(f"{name}: {sheet}" for name, sheet in operating_sources.items() if sheet)
         if source_text:

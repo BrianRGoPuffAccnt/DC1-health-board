@@ -1352,3 +1352,15 @@ input {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* Chat bubbles sit on a plain light background, unlike the colored hero
+   banners/KPI tiles the global white-text rule above was written for —
+   override it here for readable body-text contrast. */
+[data-testid="stChatMessage"],
+[data-testid="stChatMessage"] .stMarkdown,
+[data-testid="stChatMessage"] p {
+  color: var(--gp-ink) !important;
+  font-size: 0.98rem;
+  line-height: 1.55;
+  text-shadow: none !important;
+}
