@@ -226,6 +226,9 @@ EMBED_TARGETS = {
     "executive_note": "Executive Copy-Ready Note",
     "phl_ship_plan": "PHL Ships Plan",
     "shipment_plan": "PHL Ships Plan",
+    "ob_tracker": "Live Outbound Tracking",
+    "outbound_tracker": "Live Outbound Tracking",
+    "live_outbound_tracking": "Live Outbound Tracking",
     "market_profiles": "Market Profiles",
     "mfc_lookup": "MFC Lookup",
     "mfc_profiles": "MFC Profiles",
@@ -9579,6 +9582,39 @@ def render_phl_ship_plan_embed(context: DailyHealthContext) -> None:
     render_phl_plan_control(context, ship_plan, ship_totals, ship_label)
 
 
+def render_ob_tracker_embed(context: DailyHealthContext) -> None:
+    """Auto-scoped OB Tracker view for Google Sites — always shows the most recent
+    combined tabs (Today + Rollover) instead of pinning to whatever tab was active
+    when a native Sheets embed/link was first created."""
+    tracker = context.ob_tracker
+    status = "Green" if not tracker.empty else "Yellow"
+    meta_bits = []
+    if context.ob_sheets:
+        meta_bits.append(f"Tabs: {', '.join(context.ob_sheets[-3:])}")
+    if context.ob_source:
+        meta_bits.append(f"Source: {context.ob_source}")
+    render_enterprise_module_header(
+        "Transportation Control",
+        "Live Outbound Tracking",
+        "Outbound TO Tracker, auto-combined across the most recent dated tabs — always current, no manual tab switching.",
+        status,
+        " | ".join(meta_bits) or (context.ob_reason or "Not connected"),
+    )
+    if tracker.empty:
+        st.info("OB Tracker isn't connected yet, or no dated tabs were found in the connected sheet.")
+        return
+
+    day_order = {"Today": 0, "Rollover (Yesterday)": 1}
+    display = tracker.copy()
+    display["_day_sort"] = display.get("_ob_day_label", "").map(lambda label: day_order.get(label, 2))
+    display = display.sort_values("_day_sort")
+    display = display.rename(columns={"_ob_day_label": "Day"})
+    drop_cols = ["_ob_tab", "_ob_tab_date", "_day_sort"]
+    display = display.drop(columns=[col for col in drop_cols if col in display.columns])
+    ordered_cols = ["Day"] + [col for col in display.columns if col != "Day"]
+    st.dataframe(display[ordered_cols], use_container_width=True, hide_index=True)
+
+
 def render_google_sites_embed(embed_mode: str) -> None:
     st.markdown('<div class="gp-embed-shell">', unsafe_allow_html=True)
     install_google_refresh_timer()
@@ -9608,6 +9644,8 @@ def render_google_sites_embed(embed_mode: str) -> None:
         render_embed_transportation_control(context)
     elif embed_mode in {"phl_ship_plan", "shipment_plan"}:
         render_phl_ship_plan_embed(context)
+    elif embed_mode in {"ob_tracker", "outbound_tracker", "live_outbound_tracking"}:
+        render_ob_tracker_embed(context)
     elif embed_mode in {"executive_brief", "executive_briefs", "executive_shipping_readiness", "executive_briefing_center"}:
         render_executive_briefs_view(context, health, ops_data)
     elif embed_mode in {"executive_summary", "executive_brief_summary"}:
