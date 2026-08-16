@@ -7062,6 +7062,84 @@ def load_otp_bridges_from_google_sheets(connections: pd.DataFrame) -> pd.DataFra
     return bridge
 
 
+def select_current_and_previous_otp_weeks(sheet_names: list[str]) -> list[str]:
+    """From a list of week-labeled tabs (e.g. 'Week 33 (Current)', 'Week 32', ...),
+    return the tab explicitly marked (Current) plus the tab for the week number
+    immediately before it, if present. If more than one tab is labeled (Current) — a
+    stale leftover label from a prior week that was never renamed — the highest week
+    number wins, not whichever happens to appear last in the tab list."""
+    current_candidates: dict[int, str] = {}
+    week_by_number: dict[int, str] = {}
+    for name in sheet_names:
+        match = re.search(r"week\s*(\d+)", name, re.IGNORECASE)
+        if not match:
+            continue
+        week_num = int(match.group(1))
+        week_by_number.setdefault(week_num, name)
+        if "current" in name.casefold():
+            current_candidates[week_num] = name
+    if not current_candidates:
+        return []
+    current_week = max(current_candidates)
+    selected = [current_candidates[current_week]]
+    if (current_week - 1) in week_by_number:
+        selected.append(week_by_number[current_week - 1])
+    return selected
+
+
+def build_otp_weekly_summary() -> pd.DataFrame:
+    """Current + previous week OTP performance per connected carrier workbook (IMQF/
+    WTCH), tallying the raw On-Time Status column (Missing Check Call / Late / On Time).
+    Missing Check Call means Actual Delivery Arrival was never recorded — nobody
+    confirmed the delivery — which is worth surfacing on its own, not just folded into
+    an overall OTP percentage."""
+    otp_connections = all_google_sheets_by_type("OTP")
+    if otp_connections.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, connection in otp_connections.iterrows():
+        carrier_group = str(connection.get("name") or "OTP Bridge")
+        sheet_names = list_google_sheet_names(connection)
+        for tab_name in select_current_and_previous_otp_weeks(sheet_names):
+            values = read_google_sheet_named_values(connection, tab_name)
+            if not values:
+                continue
+            data = extract_otp_rows(pd.DataFrame(values), carrier_group, tab_name)
+            if data.empty or "On-Time Status" not in data.columns:
+                continue
+            week_label = "Current" if "current" in tab_name.casefold() else "Previous"
+            status_values = data["On-Time Status"].astype(str).str.strip()
+            rows.append(
+                {
+                    "Carrier Workbook": carrier_group,
+                    "Week": f"{week_label} ({tab_name})",
+                    "Missing Check Call": int(status_values.eq("Missing Check Call").sum()),
+                    "Late": int(status_values.eq("Late").sum()),
+                    "On Time": int(status_values.eq("On Time").sum()),
+                    "Total Rows": len(data),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def render_otp_weekly_summary() -> None:
+    summary = build_otp_weekly_summary()
+    st.markdown('<div class="gp-section-label">Weekly OTP Summary (Current + Previous Week)</div>', unsafe_allow_html=True)
+    if summary.empty:
+        st.caption("No current/previous week OTP data found in the connected OTP Bridge sheets yet.")
+        return
+    st.caption("Missing Check Call means Actual Delivery Arrival was never recorded for that shipment — worth chasing down on its own.")
+
+    def highlight_missing(value: object) -> str:
+        if isinstance(value, (int, float)) and value > 0:
+            return "background-color: #fde8e8; color: #b93a3a; font-weight: 700"
+        return ""
+
+    styled = summary.style.map(highlight_missing, subset=["Missing Check Call"])
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
 def find_otp_header_row(raw: pd.DataFrame) -> int | None:
     for idx, row in raw.iterrows():
         values = {str(value).strip() for value in row.dropna().tolist()}
@@ -11318,6 +11396,7 @@ def main() -> None:
                     )
 
     if view == "Carrier OTP Bridge":
+        render_otp_weekly_summary()
         if otp_bridge.empty:
             st.info("Connect one or more OTP Bridge Google Sheets (tag: OTP), or upload a weekly OTP bridge workbook from the sidebar, to populate carrier performance.")
         else:
