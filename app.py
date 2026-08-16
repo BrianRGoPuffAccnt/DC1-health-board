@@ -4789,7 +4789,15 @@ def render_outbound_pulse(context: DailyHealthContext) -> None:
         return ""
 
     styled = eta_table.style.map(highlight_hours, subset=list(default_rates.keys()))
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            scenario: st.column_config.NumberColumn(scenario, format="%.1fh")
+            for scenario in default_rates
+        },
+    )
 
     render_picker_assignment_table(ob_tracker)
 
