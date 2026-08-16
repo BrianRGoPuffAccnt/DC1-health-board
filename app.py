@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import math
 import os
 import re
 import sqlite3
@@ -4530,10 +4531,17 @@ def parse_picker_names(cell: object) -> list[str]:
 
 
 def current_pick_shift(now: datetime | None = None) -> str:
-    """Day shift 6 AM-6 PM Eastern, otherwise night shift. Adjust here if DC1's actual
-    shift boundary differs."""
-    hour = (now or now_eastern()).hour
-    return "day" if 6 <= hour < 18 else "night"
+    """Day 7 AM-3 PM Eastern, NS (second shift) 3 PM-11:30 PM. Outside both (overnight
+    gap) defaults to 'day' as the next shift starting. NS is slated for eventual
+    cancellation under a day-shift-only model — this only affects which row gets the
+    '(current)' tag, not which shifts get computed."""
+    moment = now or now_eastern()
+    minutes = moment.hour * 60 + moment.minute
+    if 7 * 60 <= minutes < 15 * 60:
+        return "day"
+    if 15 * 60 <= minutes < 23 * 60 + 30:
+        return "night"
+    return "day"
 
 
 def count_active_pickers(ob_tracker: pd.DataFrame, shift: str) -> tuple[int, list[str]]:
@@ -4572,56 +4580,74 @@ def ob_tracker_units_left(ob_tracker: pd.DataFrame) -> int:
 
 
 def render_outbound_pulse(context: DailyHealthContext) -> None:
-    """Outbound's two sync-meeting headline numbers (units left to pick, pickers on
-    shift) plus an estimated-completion chart across pick-rate scenarios, since real
-    pick-rate isn't available to integrate live."""
+    """Outbound's sync-meeting headline number (units left to pick) plus a labor-
+    allocation planner: picker supply per shift compared against pick-rate scenarios,
+    independent of hours actually remaining in that shift — a "how many pickers do we
+    need" tool, not a live ETA. Flags anything over 8 hours as needing more pickers."""
     ob_tracker = context.ob_tracker
     if ob_tracker.empty:
         st.info("Outbound pulse is waiting on the OB TO Tracker connection.")
         return
 
-    shift = current_pick_shift()
     units_left = ob_tracker_units_left(ob_tracker)
-    picker_count, picker_names = count_active_pickers(ob_tracker, shift)
+    day_count, day_names = count_active_pickers(ob_tracker, "day")
+    ns_count, ns_names = count_active_pickers(ob_tracker, "night")
+    active_shift = current_pick_shift()
 
     st.markdown('<div class="gp-section-label">Outbound</div>', unsafe_allow_html=True)
-    outbound_cols = st.columns(2)
-    outbound_cols[0].metric("Units Left to Pick", format_number(units_left), "OB Tracker, not yet Staged")
-    outbound_cols[1].metric(f"Pickers on Shift ({shift.title()})", format_number(picker_count), "Distinct names, active GUSTOs")
+    st.metric("Units Left to Pick", format_number(units_left), "OB Tracker, not yet Staged")
 
-    if units_left and picker_count:
-        st.caption("Estimated time to clear the pick queue, by assumed rate scenario (no real pick-rate feed available):")
-        rate_cols = st.columns(3)
-        default_rates = {"Conservative": 30, "Average": 50, "Aggressive": 70}
-        scenarios = []
-        for col, (scenario_label, default_rate) in zip(rate_cols, default_rates.items()):
-            rate = col.number_input(
-                f"{scenario_label} units/hr per picker",
-                min_value=1,
-                value=default_rate,
-                step=5,
-                key=f"pick_rate_{scenario_label.lower()}",
-            )
-            hours = units_left / (picker_count * rate)
-            scenarios.append({"Scenario": scenario_label, "Units/hr/picker": rate, "Est. Hours Remaining": round(hours, 1)})
+    if not units_left:
+        with st.expander("Picker names detected per shift", expanded=False):
+            st.write(f"**Day (7:00 AM–3:00 PM):** {', '.join(day_names) if day_names else 'None detected.'}")
+            st.write(f"**NS (3:00 PM–11:30 PM):** {', '.join(ns_names) if ns_names else 'None detected.'}")
+        return
 
-        eta_df = pd.DataFrame(scenarios)
-        fig_eta = px.bar(
-            eta_df,
-            x="Scenario",
-            y="Est. Hours Remaining",
-            text="Est. Hours Remaining",
-            color="Scenario",
-            color_discrete_map={"Conservative": "#b93a3a", "Average": "#9a6a00", "Aggressive": "#1f7a4d"},
+    st.caption(
+        "Picker supply by shift vs. three pick-rate scenarios — independent of hours actually "
+        "left in the shift, so it reads as a labor-allocation planner. Red = over 8 hours to "
+        "clear at that rate; the last column suggests how many more pickers would close the gap."
+    )
+    rate_cols = st.columns(3)
+    default_rates = {"Conservative": 30, "Average": 50, "Aggressive": 70}
+    rates = {}
+    for col, (scenario_label, default_rate) in zip(rate_cols, default_rates.items()):
+        rates[scenario_label] = col.number_input(
+            f"{scenario_label} units/hr per picker",
+            min_value=1,
+            value=default_rate,
+            step=5,
+            key=f"pick_rate_{scenario_label.lower()}",
         )
-        fig_eta.update_traces(texttemplate="%{text:.1f}h", textposition="outside")
-        fig_eta.update_layout(height=280, margin=dict(l=10, r=10, t=20, b=10), showlegend=False)
-        st.plotly_chart(fig_eta, use_container_width=True)
-    elif units_left and not picker_count:
-        st.caption(f"{format_number(units_left)} units left, but no pickers detected on the {shift} shift column — can't estimate completion time.")
 
-    with st.expander("Picker names detected this shift", expanded=False):
-        st.write(", ".join(picker_names) if picker_names else "None detected.")
+    shifts = [
+        ("Day (7:00 AM–3:00 PM)", "day", day_count),
+        ("NS (3:00 PM–11:30 PM)", "night", ns_count),
+    ]
+    rows = []
+    for shift_label, shift_key, picker_count in shifts:
+        label = shift_label + (" — current" if shift_key == active_shift else "")
+        row = {"Shift": label, "Pickers": picker_count}
+        for scenario_label, rate in rates.items():
+            row[scenario_label] = round(units_left / (picker_count * rate), 1) if picker_count else None
+        avg_rate = rates["Average"]
+        needed_for_8h = math.ceil(units_left / (8 * avg_rate))
+        row["Pickers Needed (≤8h @ Average)"] = max(0, needed_for_8h - picker_count)
+        rows.append(row)
+
+    eta_table = pd.DataFrame(rows)
+
+    def highlight_over_8(value: object) -> str:
+        if isinstance(value, (int, float)) and value > 8:
+            return "background-color: #fde8e8; color: #b93a3a; font-weight: 700"
+        return ""
+
+    styled = eta_table.style.map(highlight_over_8, subset=list(default_rates.keys()))
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    with st.expander("Picker names detected per shift", expanded=False):
+        st.write(f"**Day (7:00 AM–3:00 PM):** {', '.join(day_names) if day_names else 'None detected.'}")
+        st.write(f"**NS (3:00 PM–11:30 PM):** {', '.join(ns_names) if ns_names else 'None detected.'}")
 
 
 def render_live_update(context: DailyHealthContext) -> None:
