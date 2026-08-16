@@ -1844,18 +1844,28 @@ def read_reference_workbook_named_values(file_id: int, sheet_name: str) -> list[
     return raw.fillna("").values.tolist()
 
 
-def latest_google_sheet_by_type(workbook_type: str) -> pd.Series | None:
+def all_google_sheets_by_type(workbook_type: str) -> pd.DataFrame:
+    """Every connection matching a tag, newest-synced first — unlike
+    latest_google_sheet_by_type(), which returns only one. Needed when multiple sheets
+    legitimately feed the same feature, e.g. per-carrier OTP Bridge workbooks."""
     connections = list_google_sheet_connections()
     if connections.empty:
-        return None
+        return connections
     matches = connections[
         connections["tag"].astype(str).str.casefold().eq(workbook_type.casefold())
         | connections["name"].astype(str).str.casefold().str.contains(workbook_type.casefold(), regex=False, na=False)
     ].copy()
     if matches.empty:
-        return None
+        return matches
     matches["synced_sort"] = pd.to_datetime(matches["last_synced_at"], errors="coerce")
-    return matches.sort_values(["synced_sort", "id"], ascending=False).iloc[0]
+    return matches.sort_values(["synced_sort", "id"], ascending=False)
+
+
+def latest_google_sheet_by_type(workbook_type: str) -> pd.Series | None:
+    matches = all_google_sheets_by_type(workbook_type)
+    if matches.empty:
+        return None
+    return matches.iloc[0]
 
 
 def list_google_sheet_names(connection: pd.Series | None) -> list[str]:
@@ -6979,6 +6989,35 @@ def load_ops_weekly_trend(excel: pd.ExcelFile) -> pd.DataFrame:
     return weekly
 
 
+def extract_otp_rows(raw: pd.DataFrame, source_name: str, week_label: str) -> pd.DataFrame:
+    """One tab/sheet's worth of OTP rows, given its raw ungridded values. Shared by the
+    file-upload and live-Google-Sheets loaders so a fix to the parsing applies to both."""
+    header_idx = find_otp_header_row(raw)
+    if header_idx is None:
+        return pd.DataFrame()
+
+    headers = raw.iloc[header_idx].fillna("").astype(str).str.strip().tolist()
+    available_cols = min(len(headers), len(OTP_COLUMNS))
+    data = raw.iloc[header_idx + 1 :, :available_cols].copy()
+    data.columns = headers[:available_cols]
+
+    required_cols = [col for col in OTP_COLUMNS if col in data.columns]
+    data = data[required_cols]
+
+    if "TO #" not in data.columns:
+        return pd.DataFrame()
+
+    data = data.dropna(subset=["TO #"], how="all")
+    data = data[data["TO #"].astype(str).str.strip().ne("")]
+
+    if data.empty:
+        return pd.DataFrame()
+
+    data["Source File"] = source_name
+    data["Week"] = week_label.strip()
+    return data
+
+
 def load_otp_bridges(files: list[BytesIO]) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
 
@@ -6988,30 +7027,32 @@ def load_otp_bridges(files: list[BytesIO]) -> pd.DataFrame:
         source_name = getattr(file, "name", "Uploaded OTP Bridge")
 
         for sheet_name, raw in workbook.items():
-            header_idx = find_otp_header_row(raw)
-            if header_idx is None:
+            data = extract_otp_rows(raw, source_name, sheet_name)
+            if not data.empty:
+                frames.append(data)
+
+    if not frames:
+        return pd.DataFrame(columns=OTP_COLUMNS + ["Source File", "Week"])
+
+    bridge = pd.concat(frames, ignore_index=True)
+    bridge = normalize_otp_bridge(bridge)
+    return bridge
+
+
+def load_otp_bridges_from_google_sheets(connections: pd.DataFrame) -> pd.DataFrame:
+    """Same parsing as load_otp_bridges() but sourced from live Google Sheets connections
+    (tag: OTP) instead of uploaded files — combines every connected carrier's workbook,
+    since more than one legitimately feeds this view (e.g. IMQF and WTCH)."""
+    frames: list[pd.DataFrame] = []
+    for _, connection in connections.iterrows():
+        source_name = str(connection.get("name") or "Connected OTP Bridge")
+        for sheet_name in list_google_sheet_names(connection):
+            values = read_google_sheet_named_values(connection, sheet_name)
+            if not values:
                 continue
-
-            headers = raw.iloc[header_idx].fillna("").astype(str).str.strip().tolist()
-            available_cols = min(len(headers), len(OTP_COLUMNS))
-            data = raw.iloc[header_idx + 1 :, :available_cols].copy()
-            data.columns = headers[:available_cols]
-
-            required_cols = [col for col in OTP_COLUMNS if col in data.columns]
-            data = data[required_cols]
-
-            if "TO #" not in data.columns:
-                continue
-
-            data = data.dropna(subset=["TO #"], how="all")
-            data = data[data["TO #"].astype(str).str.strip().ne("")]
-
-            if data.empty:
-                continue
-
-            data["Source File"] = source_name
-            data["Week"] = sheet_name.strip()
-            frames.append(data)
+            data = extract_otp_rows(pd.DataFrame(values), source_name, sheet_name)
+            if not data.empty:
+                frames.append(data)
 
     if not frames:
         return pd.DataFrame(columns=OTP_COLUMNS + ["Source File", "Week"])
@@ -10604,6 +10645,12 @@ def main() -> None:
         "weekly": pd.DataFrame(),
     }
 
+    otp_connections = all_google_sheets_by_type("OTP")
+    if not otp_connections.empty:
+        live_otp_bridge = load_otp_bridges_from_google_sheets(otp_connections)
+        if not live_otp_bridge.empty:
+            otp_bridge = live_otp_bridge
+
     if otp_files:
         otp_bridge = load_otp_bridges(otp_files)
 
@@ -11205,7 +11252,7 @@ def main() -> None:
 
     if view == "Carrier OTP Bridge":
         if otp_bridge.empty:
-            st.info("Upload one or more weekly OTP bridge workbooks to populate carrier performance.")
+            st.info("Connect one or more OTP Bridge Google Sheets (tag: OTP), or upload a weekly OTP bridge workbook from the sidebar, to populate carrier performance.")
         else:
             otp_summary = summarize_otp(otp_bridge)
             late_count = int(otp_bridge["On-Time Status"].str.lower().eq("late").sum())
