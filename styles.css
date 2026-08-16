@@ -43,6 +43,18 @@
      0.65px  0.65px 0 rgba(0, 0, 0, 0.58);
 }
 
+/* Captions render white (rule above) to match the rest of the app's forced-white text,
+   but on the plain gray page background — the default everywhere a caption isn't inside
+   one of its own colored panels — that's nearly invisible. Give every caption its own
+   small blue panel so the white text has something to sit on. */
+[data-testid="stAppViewContainer"] [data-testid="stCaptionContainer"] {
+  background: linear-gradient(135deg, #102033 0%, #173b57 58%, #0f6f97 100%);
+  border-radius: 6px;
+  display: inline-block;
+  margin: 0.25rem 0 0.7rem;
+  padding: 0.4rem 0.7rem;
+}
+
 [data-testid="stMetricLabel"],
 [data-testid="stMetricValue"],
 .gp-header__title,

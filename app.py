@@ -4743,6 +4743,7 @@ def render_outbound_pulse(context: DailyHealthContext) -> None:
         render_picker_assignment_table(ob_tracker)
         return
 
+    st.markdown('<div class="gp-section-label">Labor Scenario Calculator</div>', unsafe_allow_html=True)
     st.caption(
         "Picker supply by shift vs. three pick-rate scenarios — independent of hours actually "
         "left in the shift, so it reads as a labor-allocation planner. Green = 0-4h, yellow = "
