@@ -4510,24 +4510,34 @@ def render_outstanding_site_blocks(context: DailyHealthContext) -> None:
             )
 
 
-def parse_picker_names(cell: object) -> list[str]:
-    """Extract picker name(s) from an OB Tracker picker cell, discarding the trailing
-    placard-progress number(s). A cell with a '/' divider means two pickers split the
-    same GUSTO (e.g. 'DOM 1-3 / JAY 4' -> ['DOM', 'JAY']). Best-effort text parsing over
-    a free-typed column — not guaranteed to catch every naming variant."""
+def parse_picker_assignments(cell: object) -> list[tuple[str, str]]:
+    """Extract (picker_name, placard_progress_text) pairs from an OB Tracker picker cell.
+    A '/' divider means multiple pickers split the same GUSTO (e.g. 'DOM 1-3 / JAY 4' ->
+    [('DOM', '1-3'), ('JAY', '4')]). Best-effort text parsing over a free-typed column —
+    not guaranteed to catch every naming variant."""
     text = cell_text(cell)
     if not text:
         return []
-    names = []
+    assignments = []
     for segment in text.split("/"):
         segment = segment.strip()
         if not segment:
             continue
         match = re.match(r"^([A-Za-z][A-Za-z\s\.'()\-]*?)(?=\s*\d|$)", segment)
-        name = (match.group(1).strip() if match and match.group(1).strip() else segment).upper()
-        if name:
-            names.append(name)
-    return names
+        if match and match.group(1).strip():
+            name = match.group(1).strip().upper()
+            placards = segment[match.end():].strip()
+        else:
+            name = segment.upper()
+            placards = ""
+        assignments.append((name, placards))
+    return assignments
+
+
+def parse_picker_names(cell: object) -> list[str]:
+    """Names only, discarding placard-progress text — used where only a distinct-picker
+    count is needed. See parse_picker_assignments for the (name, placards) detail."""
+    return [name for name, _ in parse_picker_assignments(cell)]
 
 
 def current_pick_shift(now: datetime | None = None) -> str:
@@ -4579,6 +4589,74 @@ def ob_tracker_units_left(ob_tracker: pd.DataFrame) -> int:
     return int(pd.to_numeric(work[units_col], errors="coerce").fillna(0).sum())
 
 
+def build_picker_assignment_detail(ob_tracker: pd.DataFrame) -> pd.DataFrame:
+    """One row per (picker, GUSTO) pair, expanded from the Day/Night picker columns'
+    free-text cells — Status, GUSTO, placard progress, Units, and Carrier per assignment."""
+    if ob_tracker.empty:
+        return pd.DataFrame()
+    status_col = first_matching_column(ob_tracker, [["status"]])
+    to_col = first_matching_column(ob_tracker, [["to"], ["po", "number"]])
+    units_col = first_matching_column(ob_tracker, [["units"]])
+    carrier_col = first_matching_column(ob_tracker, [["carrier"]])
+    day_col = first_matching_column(ob_tracker, [["picker", "day"]])
+    night_col = first_matching_column(ob_tracker, [["picker", "night"]])
+    if not day_col and not night_col:
+        return pd.DataFrame()
+
+    rows = []
+    for _, row in ob_tracker.iterrows():
+        status = cell_text(row.get(status_col)) if status_col else ""
+        gusto = cell_text(row.get(to_col)) if to_col else ""
+        units_value = pd.to_numeric(row.get(units_col), errors="coerce") if units_col else None
+        units_value = 0 if units_value is None or pd.isna(units_value) else units_value
+        carrier = cell_text(row.get(carrier_col)) if carrier_col else ""
+        for shift_label, picker_col in [("Day", day_col), ("NS", night_col)]:
+            if not picker_col:
+                continue
+            for name, placards in parse_picker_assignments(row.get(picker_col)):
+                rows.append(
+                    {
+                        "Shift": shift_label,
+                        "Picker": name,
+                        "Status": status,
+                        "GUSTO": gusto,
+                        "Placard Progress": placards,
+                        "Units": units_value,
+                        "Carrier": carrier,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def render_picker_assignment_table(ob_tracker: pd.DataFrame) -> None:
+    detail = build_picker_assignment_detail(ob_tracker)
+    st.markdown("#### Picker Assignment Detail")
+    if detail.empty:
+        st.caption("No picker assignments detected in the OB Tracker.")
+        return
+    detail = detail.sort_values(["Shift", "Picker", "Carrier"]).reset_index(drop=True)
+    total_row = pd.DataFrame(
+        [
+            {
+                "Shift": "",
+                "Picker": "TOTAL",
+                "Status": "",
+                "GUSTO": f"{len(detail):,} assignment(s)",
+                "Placard Progress": "",
+                "Units": detail["Units"].sum(),
+                "Carrier": "",
+            }
+        ]
+    )
+    display = pd.concat([detail, total_row], ignore_index=True)
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        column_config={"Units": st.column_config.NumberColumn("Units", format="%,.0f")},
+    )
+
+
 def render_outbound_pulse(context: DailyHealthContext) -> None:
     """Outbound's sync-meeting headline number (units left to pick) plus a labor-
     allocation planner: picker supply per shift compared against pick-rate scenarios,
@@ -4590,23 +4668,22 @@ def render_outbound_pulse(context: DailyHealthContext) -> None:
         return
 
     units_left = ob_tracker_units_left(ob_tracker)
-    day_count, day_names = count_active_pickers(ob_tracker, "day")
-    ns_count, ns_names = count_active_pickers(ob_tracker, "night")
+    day_count, _ = count_active_pickers(ob_tracker, "day")
+    ns_count, _ = count_active_pickers(ob_tracker, "night")
     active_shift = current_pick_shift()
 
     st.markdown('<div class="gp-section-label">Outbound</div>', unsafe_allow_html=True)
     st.metric("Units Left to Pick", format_number(units_left), "OB Tracker, not yet Staged")
 
     if not units_left:
-        with st.expander("Picker names detected per shift", expanded=False):
-            st.write(f"**Day (7:00 AM–3:00 PM):** {', '.join(day_names) if day_names else 'None detected.'}")
-            st.write(f"**NS (3:00 PM–11:30 PM):** {', '.join(ns_names) if ns_names else 'None detected.'}")
+        render_picker_assignment_table(ob_tracker)
         return
 
     st.caption(
         "Picker supply by shift vs. three pick-rate scenarios — independent of hours actually "
-        "left in the shift, so it reads as a labor-allocation planner. Red = over 8 hours to "
-        "clear at that rate; the last column suggests how many more pickers would close the gap."
+        "left in the shift, so it reads as a labor-allocation planner. Green = 0-4h, yellow = "
+        "4-8h, red = over 8h to clear at that rate; the last column suggests how many more "
+        "pickers would close the gap to 8h at the Average rate."
     )
     rate_cols = st.columns(3)
     default_rates = {"Conservative": 30, "Average": 50, "Aggressive": 70}
@@ -4637,17 +4714,19 @@ def render_outbound_pulse(context: DailyHealthContext) -> None:
 
     eta_table = pd.DataFrame(rows)
 
-    def highlight_over_8(value: object) -> str:
-        if isinstance(value, (int, float)) and value > 8:
-            return "background-color: #fde8e8; color: #b93a3a; font-weight: 700"
+    def highlight_hours(value: object) -> str:
+        if isinstance(value, (int, float)):
+            if value > 8:
+                return "background-color: #fde8e8; color: #b93a3a; font-weight: 700"
+            if value > 4:
+                return "background-color: #fff5cc; color: #946200; font-weight: 700"
+            return "background-color: #e8f5ef; color: #1f7a4d; font-weight: 700"
         return ""
 
-    styled = eta_table.style.map(highlight_over_8, subset=list(default_rates.keys()))
+    styled = eta_table.style.map(highlight_hours, subset=list(default_rates.keys()))
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    with st.expander("Picker names detected per shift", expanded=False):
-        st.write(f"**Day (7:00 AM–3:00 PM):** {', '.join(day_names) if day_names else 'None detected.'}")
-        st.write(f"**NS (3:00 PM–11:30 PM):** {', '.join(ns_names) if ns_names else 'None detected.'}")
+    render_picker_assignment_table(ob_tracker)
 
 
 def render_live_update(context: DailyHealthContext) -> None:
