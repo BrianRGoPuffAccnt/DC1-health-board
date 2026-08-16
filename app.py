@@ -10107,24 +10107,28 @@ def render_about_guide() -> None:
 
 
 def render_cost_lane_intelligence() -> None:
-    st.subheader("Cost & Lane Intelligence")
-    st.caption("Read-only prototype using the RFP workbook. Designed for future finance handoff and validation.")
-    ref = latest_reference_by_type("RFP Cost")
-    if ref is None:
-        st.info("Upload the RFP Cost workbook as a reference sheet to populate this view.")
+    connection = latest_google_sheet_by_type("RFP Cost")
+    render_enterprise_module_header(
+        "Operations",
+        "Cost & Lane Intelligence",
+        "Read-only lane/carrier pricing view from the live RFP Cost sheet. Designed for future finance handoff and validation.",
+        "Green" if connection is not None else "Yellow",
+        f"Source: {connection['name']}" if connection is not None else "Not connected",
+    )
+    if connection is None:
+        st.info("Connect the RFP Cost Google Sheet (tag: RFP Cost) to populate this view.")
         return
 
-    loaded = load_reference_sheet(int(ref["id"]))
-    if loaded is None:
-        st.warning("Saved RFP workbook could not be opened.")
+    sheet_names = list_google_sheet_names(connection)
+    target_sheets = [sheet for sheet in sheet_names if any(token in sheet.lower() for token in ["linehaul", "final mile", "inbound", "current pricing"])]
+    if not target_sheets:
+        st.info("No linehaul / final mile / inbound / current pricing tabs found in the connected RFP Cost sheet yet.")
         return
-    filename, _, payload = loaded
-    excel = pd.ExcelFile(BytesIO(payload))
-    target_sheets = [sheet for sheet in excel.sheet_names if any(token in sheet.lower() for token in ["linehaul", "final mile", "inbound", "current pricing"])]
+
     summary_rows = []
     previews: dict[str, pd.DataFrame] = {}
     for sheet in target_sheets[:8]:
-        table = infer_header_table(pd.read_excel(excel, sheet_name=sheet, header=None))
+        table = read_google_sheet_named_table(connection, sheet)
         previews[sheet] = table
         lane_col = first_matching_column(table, [["lane"], ["location"]])
         carrier_col = first_matching_column(table, [["carrier"]])
