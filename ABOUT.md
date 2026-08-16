@@ -33,7 +33,7 @@ The primary view for DC floor leads. Two embedded panels:
 - Pallet completion percentage — how many pallets are staged vs total for today's ship date
 - Open pallets remaining for prep and staging
 - Active GUSTOs and MFC destinations
-- Units Not Yet Picked (NYP) with fill rate progress
+- Units Left (units not yet picked) with fill rate progress
 - Cross-Dock Readiness bar chart by lane
 - Labor Focus by MFC — the specific GUSTOs that need the most attention right now
 
@@ -89,8 +89,8 @@ A Claude-powered assistant (Home section) that answers questions against live DC
 | **SDT** | Standard Departure Time — the scheduled load-ready and departure window per carrier |
 | **Cross-Dock** | The lane code used to organize pallets on the dock floor (same as lane) |
 | **OB Tracker** | The Outbound TO Tracker Google Sheet — updated by the DC team daily with TO status |
-| **Fill Rate** | The Operations Fill Rate sheet — tracks pallet staging, units NYP, and dock activity |
-| **Units NYP** | Units Not Yet Picked — units allocated to a GUSTO but not yet staged or scanned |
+| **Fill Rate** | The Operations Fill Rate sheet — tracks pallet staging, units left, and dock activity |
+| **Units Left** | Units allocated to a GUSTO but not yet staged or scanned (formerly "NYP" / units not yet picked) |
 | **Open TO** | A transfer order that is not yet in Loaded / Closed status |
 | **Allocation History** | The DC1 Allocations Tracker — the original source of what GUSTOs were planned for each ship date |
 

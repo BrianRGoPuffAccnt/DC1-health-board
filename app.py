@@ -2576,7 +2576,7 @@ def build_fill_rate_readiness(fill_rate: pd.DataFrame) -> pd.DataFrame:
     )
     summary["_route_key"] = summary["Fill Carrier"].map(normalize_route_key)
     summary["Pallet Readiness Risk"] = "Normal"
-    summary.loc[summary["Units_NYP"].gt(0), "Pallet Readiness Risk"] = "Units NYP"
+    summary.loc[summary["Units_NYP"].gt(0), "Pallet Readiness Risk"] = "Units Left"
     summary.loc[summary["PO_WO_Pallets"].gt(0), "Pallet Readiness Risk"] = "PO W/O Pallets"
     return summary
 
@@ -3128,7 +3128,7 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
         metric_cols[4].metric("Rollover Open", format_number(rollover_open))
         metric_cols[5].metric("Not in OB Yet", format_number(total_gap))
         metric_cols[6].metric("Lines Remaining", format_number(work_remaining))
-        metric_cols[7].metric("Units NYP", format_number(units_nyp))
+        metric_cols[7].metric("Units Left", format_number(units_nyp))
     else:
         metric_cols = st.columns(7)
         metric_cols[0].metric("Window Health", status)
@@ -3137,7 +3137,7 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
         metric_cols[3].metric("Open TOs", format_number(open_tos))
         metric_cols[4].metric("Rollover Open", format_number(rollover_open))
         metric_cols[5].metric("Lines Remaining", format_number(work_remaining))
-        metric_cols[6].metric("Units NYP", format_number(units_nyp))
+        metric_cols[6].metric("Units Left", format_number(units_nyp))
 
     chart_df = progress.copy()
     chart_df["Progress Display"] = chart_df["Progress %"].fillna(0) if "Progress %" in chart_df.columns else 0
@@ -3202,11 +3202,11 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
             color="Pallet Readiness",
             color_discrete_map={
                 "Normal": "#2e7d32",
-                "Units NYP": "#f9a825",
+                "Units Left": "#f9a825",
                 "PO W/O Pallets": "#c62828",
                 "No Fill Rate Match": "#78909c",
             },
-            labels={"Units_NYP": "Units NYP", "Carrier": ""},
+            labels={"Units_NYP": "Units Left", "Carrier": ""},
         )
         fig_readiness.update_layout(height=max(320, 30 * len(readiness_chart)), margin=dict(l=10, r=30, t=20, b=10))
         st.subheader("Pallet Readiness")
@@ -3253,7 +3253,7 @@ def render_schedule_progress_visual(progress: pd.DataFrame, ob_target_day: pd.Ti
     brief = (
         f"DC1 SDT x OB Tracker health for {ob_target_day.strftime('%m/%d')}: {status}. "
         f"{loaded:,} of {total_tos:,} TOs loaded across {total_routes:,} route(s); "
-        f"{open_tos:,} TOs remain open with {work_remaining:,} lines remaining and {units_nyp:,} units NYP. "
+        f"{open_tos:,} TOs remain open with {work_remaining:,} lines remaining and {units_nyp:,} units left. "
         + (f"{total_gap:,} GUSTO(s) allocated but not yet in the OB Tracker. " if total_gap else "")
         + f"{risk_routes:,} route(s) require follow-up."
     )
@@ -3410,7 +3410,7 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
     render_enterprise_module_header(
         "Daily Health Operations",
         "Ops & Labor Pulse",
-        "Pick-date readiness view for picked units vs NYP, GUSTO workload, pallet status, and same-day ship rescue.",
+        "Pick-date readiness view for picked units vs units left, GUSTO workload, pallet status, and same-day ship rescue.",
         status,
         f"{pick_label} | " + (" | ".join(source_bits) if source_bits else "Operations Fill-Rate source"),
     )
@@ -3424,9 +3424,9 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
                 "accent": "yellow" if active_gustos else "green",
             },
             {
-                "label": "Picked / NYP",
+                "label": "Picked / Left",
                 "value": f"{format_number(picked_units)} / {format_number(units_nyp)}",
-                "delta": f"{format_number(picked_units)} picked / {format_number(units_nyp)} NYP",
+                "delta": f"{format_number(picked_units)} picked / {format_number(units_nyp)} left",
                 "accent": "green" if units_nyp == 0 else "yellow" if picked_units else "red",
             },
             {
@@ -3465,6 +3465,7 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
                 labels={"value": "Units", "Carrier": "", "variable": "Work Type"},
                 color_discrete_map={"Picked_Units": "#2e7d32", "Units_NYP": "#f9a825"},
             )
+            fig_lane.for_each_trace(lambda trace: trace.update(name="Units Left") if trace.name == "Units_NYP" else trace.update(name="Picked Units"))
             fig_lane.update_layout(height=max(320, 34 * len(lane_chart)), margin=dict(l=10, r=30, t=10, b=10))
             st.plotly_chart(fig_lane, use_container_width=True)
         with lane_cols[1]:
@@ -3484,7 +3485,9 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Pick_Completion": st.column_config.ProgressColumn("Pick Completion", format="%.0f%%", min_value=0, max_value=1)
+                    "Pick_Completion": st.column_config.ProgressColumn("Pick Completion", format="%.0f%%", min_value=0, max_value=1),
+                    "Units_NYP": st.column_config.NumberColumn("Units Left", format="%,.0f"),
+                    "Picked_Units": st.column_config.NumberColumn("Picked Units", format="%,.0f"),
                 },
             )
 
@@ -3537,7 +3540,7 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
                 orientation="h",
                 color="Gustos",
                 color_continuous_scale=["#3a77a8", "#efb13f"],
-                labels={"Units_NYP": "Units NYP", "Dock Door": "", "Gustos": "GUSTOs"},
+                labels={"Units_NYP": "Units Left", "Dock Door": "", "Gustos": "GUSTOs"},
             )
             fig_dock.update_layout(height=320, margin=dict(l=10, r=30, t=10, b=10), coloraxis_showscale=False)
             st.plotly_chart(fig_dock, use_container_width=True)
@@ -3547,13 +3550,14 @@ def render_daily_ops_labor_embed(context: DailyHealthContext) -> None:
             dock_display["Units_NYP"] = dock_display["Units_NYP"].map(format_number)
             dock_display["Pallets"] = dock_display["Pallets"].map(format_number)
             dock_display["Weight"] = dock_display["Weight"].map(format_number)
+            dock_display = dock_display.rename(columns={"Units_NYP": "Units Left", "Picked_Units": "Picked Units"})
             st.dataframe(dock_display, use_container_width=True, hide_index=True)
 
     note_parts = [
         f"Ops/Labor pulse: {status}.",
         f"{format_number(completed_pallets)} of {format_number(total_pallets)} pallets complete ({format_percent(completion_rate)}).",
         f"{format_number(open_pallets)} pallets remain open across {format_number(active_gustos)} GUSTO(s).",
-        f"Units NYP: {format_number(units_nyp)}; PO without pallets: {format_number(po_without_pallets)}.",
+        f"Units Left: {format_number(units_nyp)}; PO without pallets: {format_number(po_without_pallets)}.",
     ]
     if not mfc_summary.empty:
         top = mfc_summary.sort_values(["Open Pallets", "Weight"], ascending=[False, False]).head(3)
@@ -3962,7 +3966,7 @@ def render_enterprise_risk_cards(risks: pd.DataFrame) -> None:
         details = [
             (f'<a class="gp-risk-card__metric-link" href="{open_tos_href}" target="_self">Open TOs</a>', format_number(row.get("Open TOs", 0))),
             ("Lines", format_number(row.get("Lines_Remaining", 0))),
-            ("Units NYP", format_number(row.get("Units_NYP", 0))),
+            ("Units Left", format_number(row.get("Units_NYP", 0))),
         ]
         detail_html = "".join(
             f'<div><span>{label if label.startswith("<a ") else html.escape(label)}</span><strong>{html.escape(value)}</strong></div>'
@@ -4072,7 +4076,7 @@ def make_live_update_note(context: DailyHealthContext) -> str:
             f"({format_percent(plan_summary['completion'])}). OB stage mix: {format_number(stages['Allocated'])} allocated, "
             f"{format_number(stages['Picking'])} picking, {format_number(stages['Staged'])} staged, {format_number(stages['Loaded'])} loaded. "
             f"{format_number(plan_summary['missing'])} missing in OB, {format_number(plan_summary['mismatch'])} date mismatch, "
-            f"{format_number(units_nyp)} units NYP, and {format_number(overflow_count)} overflow lane(s)."
+            f"{format_number(units_nyp)} units left, and {format_number(overflow_count)} overflow lane(s)."
         )
     summary = summarize_daily_health_progress(context.progress)
     risk_carriers = top_daily_health_risks(context.progress, 3)
@@ -4115,7 +4119,7 @@ def make_executive_daily_brief(context: DailyHealthContext, health: HealthResult
             f"Current watch list: {watch_line}."
         )
         action_line = (
-            "Confirm ownership for missing/date-mismatch TOs, recover NYP work by lane, and resolve linehaul overflow or capacity exceptions."
+            "Confirm ownership for missing/date-mismatch TOs, recover units-left work by lane, and resolve linehaul overflow or capacity exceptions."
         )
     else:
         risks = top_daily_health_risks(context.progress, 3)
@@ -4141,7 +4145,7 @@ def make_executive_daily_brief(context: DailyHealthContext, health: HealthResult
         f"DC1 Executive Brief | {now_eastern().strftime('%m/%d/%Y %I:%M %p')}\n\n"
         f"Overall status: {health.label}\n\n"
         f"{shipping_line}\n\n"
-        f"Pallet and pick readiness: {format_number(units_nyp)} units NYP; "
+        f"Pallet and pick readiness: {format_number(units_nyp)} units left; "
         f"{format_number(capacity_count)} lane(s) at capacity and {format_number(overflow_count)} lane(s) in overflow.\n\n"
         f"{ops_line}\n\n"
         f"Recommended action: {action_line}"
@@ -4497,7 +4501,7 @@ def render_outstanding_site_blocks(context: DailyHealthContext) -> None:
                 hide_index=True,
                 column_config={
                     "Progress to Completion": st.column_config.ProgressColumn("Progress to Completion", format="%.0f%%", min_value=0, max_value=1),
-                    "Units_NYP": st.column_config.NumberColumn("Units NYP", format="%,.0f"),
+                    "Units_NYP": st.column_config.NumberColumn("Units Left", format="%,.0f"),
                     "Units": st.column_config.NumberColumn("Units", format="%,.0f"),
                     "Pallets": st.column_config.NumberColumn("Pallets", format="%,.0f"),
                     "Weight": st.column_config.NumberColumn("Weight", format="%,.0f"),
@@ -4571,7 +4575,7 @@ def render_live_update(context: DailyHealthContext) -> None:
             {"label": "Staged / Picking", "value": f"{format_number(stages['Staged'])} / {format_number(stages['Picking'])}", "delta": "OB execution stage", "accent": "yellow" if stages["Picking"] else "green"},
             {"label": "Missing / Mismatch", "value": f"{format_number(plan_summary['missing'])} / {format_number(plan_summary['mismatch'])}", "delta": "PHL vs OB sync", "accent": "red" if int(plan_summary["missing"]) else "yellow" if int(plan_summary["mismatch"]) else "green"},
             {"label": next_win["label"], "value": next_win["value"], "delta": next_win["delta"], "accent": next_win["accent"]},
-            {"label": "Units NYP", "value": format_number(units_nyp), "delta": "Fill Rate readiness", "accent": "yellow" if units_nyp else "green"},
+            {"label": "Units Left", "value": format_number(units_nyp), "delta": "Fill Rate readiness", "accent": "yellow" if units_nyp else "green"},
             {"label": "Overflow Lanes", "value": format_number(overflow_count), "delta": ">30 pallets or >45k lbs", "accent": "red" if overflow_count else "green"},
         ],
         columns=4,
@@ -4638,7 +4642,7 @@ def render_operational_day_panel(context: DailyHealthContext, label: str, target
                 "delta": "PHL vs OB",
                 "accent": "red" if int(plan_summary["missing"]) else "yellow" if int(plan_summary["mismatch"]) else "green",
             },
-            {"label": "Pick-Date NYP", "value": format_number(units_nyp), "delta": pick_label, "accent": "yellow" if units_nyp else "green"},
+            {"label": "Pick-Date Units Left", "value": format_number(units_nyp), "delta": pick_label, "accent": "yellow" if units_nyp else "green"},
             {"label": "Overflow Lanes", "value": format_number(overflow_count), "delta": ">30 pallets or >45k lbs", "accent": "red" if overflow_count else "green"},
         ],
         columns=5,
@@ -4787,7 +4791,7 @@ def render_executive_pallet_embed(context: DailyHealthContext) -> None:
             x="Units_NYP",
             color="Pallet Readiness Risk" if "Pallet Readiness Risk" in chart.columns else None,
             orientation="h",
-            color_discrete_map={"Normal": "#2f6f4e", "Units NYP": "#b7791f", "PO Without Pallets": "#b42318", "No Fill Rate Match": "#64748b"},
+            color_discrete_map={"Normal": "#2f6f4e", "Units Left": "#b7791f", "PO Without Pallets": "#b42318", "No Fill Rate Match": "#64748b"},
         )
         fig.update_layout(
             height=360,
