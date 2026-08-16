@@ -230,6 +230,10 @@ EMBED_TARGETS = {
     "ob_tracker": "Live Outbound Tracking",
     "outbound_tracker": "Live Outbound Tracking",
     "live_outbound_tracking": "Live Outbound Tracking",
+    "carrier_otp_bridge": "Carrier OTP Bridge",
+    "otp_bridge": "Carrier OTP Bridge",
+    "cost_lane_intelligence": "Cost & Lane Intelligence",
+    "rfp_cost": "Cost & Lane Intelligence",
     "market_profiles": "Market Profiles",
     "mfc_lookup": "MFC Lookup",
     "mfc_profiles": "MFC Profiles",
@@ -7160,6 +7164,102 @@ def render_otp_weekly_summary() -> None:
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
+def render_carrier_otp_bridge_view(otp_bridge: pd.DataFrame) -> None:
+    render_enterprise_module_header(
+        "Transportation",
+        "Carrier OTP Bridge",
+        "Weekly on-time performance and delivery bridge detail across connected carrier workbooks.",
+        "Green" if not otp_bridge.empty else "Yellow",
+        f"{len(otp_bridge):,} row(s)" if not otp_bridge.empty else "Not connected",
+    )
+    render_otp_weekly_summary()
+    if otp_bridge.empty:
+        st.info("Connect one or more OTP Bridge Google Sheets (tag: OTP), or upload a weekly OTP bridge workbook from the sidebar, to populate carrier performance.")
+        return
+
+    otp_summary = summarize_otp(otp_bridge)
+    late_count = int(otp_bridge["On-Time Status"].str.lower().eq("late").sum())
+    total_shipments = len(otp_bridge)
+    overall_otp = 1 - (late_count / total_shipments if total_shipments else 0)
+    missing_check_calls = int((otp_bridge["Bridge Bucket"] == "Missing Check Call").sum())
+    late_pallets = otp_bridge.loc[
+        otp_bridge["On-Time Status"].str.lower().eq("late"), "Pallets"
+    ].sum()
+
+    col_otp, col_late, col_pallets, col_check = st.columns(4)
+    col_otp.metric("Overall OTP", format_percent(overall_otp))
+    col_late.metric("Late Shipments", format_number(late_count))
+    col_pallets.metric("Late Pallets", format_number(late_pallets))
+    col_check.metric("Missing Check Calls", format_number(missing_check_calls))
+
+    st.subheader("Carrier Reliability")
+    reliability_display = otp_summary.copy()
+    if "OTP %" in reliability_display.columns:
+        reliability_display["OTP %"] = reliability_display["OTP %"].apply(format_percent)
+    st.dataframe(
+        reliability_display,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    chart_col, bucket_col = st.columns([1.35, 1])
+    with chart_col:
+        st.subheader("OTP by SCAC")
+        fig = px.bar(
+            otp_summary.sort_values("OTP %"),
+            x="OTP %",
+            y="SCAC",
+            orientation="h",
+            color="OTP %",
+            color_continuous_scale="RdYlGn",
+            range_color=[0.75, 1],
+        )
+        fig.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    with bucket_col:
+        st.subheader("Bridge Reason Buckets")
+        bucket_summary = (
+            otp_bridge["Bridge Bucket"]
+            .value_counts()
+            .rename_axis("Bridge Bucket")
+            .reset_index(name="Count")
+        )
+        fig = px.pie(bucket_summary, values="Count", names="Bridge Bucket", hole=0.45)
+        fig.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Late Shipment Detail")
+    late_detail = otp_bridge[otp_bridge["On-Time Status"].str.lower().eq("late")].copy()
+    detail_cols = [
+        "Week",
+        "SCAC",
+        "TO #",
+        "Origin",
+        "Destination",
+        "Deliver By",
+        "Actual Delivery Arrival",
+        "Pallets",
+        "Delay Minutes",
+        "Bridge Bucket",
+        "Detailed Bridge",
+    ]
+    st.dataframe(
+        late_detail[[col for col in detail_cols if col in late_detail.columns]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def render_carrier_otp_bridge_embed() -> None:
+    """Embed-context wrapper — computes otp_bridge fresh from live Sheets since there's
+    no sidebar uploader to check in an embed, unlike the nav view's upload-can-override
+    behavior."""
+    otp_connections = all_google_sheets_by_type("OTP")
+    otp_bridge = load_otp_bridges_from_google_sheets(otp_connections) if not otp_connections.empty else pd.DataFrame()
+    render_carrier_otp_bridge_view(otp_bridge)
+
+
 def find_otp_header_row(raw: pd.DataFrame) -> int | None:
     for idx, row in raw.iterrows():
         values = {str(value).strip() for value in row.dropna().tolist()}
@@ -10202,6 +10302,10 @@ def render_google_sites_embed(embed_mode: str) -> None:
         render_phl_ship_plan_embed(context)
     elif embed_mode in {"ob_tracker", "outbound_tracker", "live_outbound_tracking"}:
         render_ob_tracker_embed(context)
+    elif embed_mode in {"carrier_otp_bridge", "otp_bridge"}:
+        render_carrier_otp_bridge_embed()
+    elif embed_mode in {"cost_lane_intelligence", "rfp_cost"}:
+        render_cost_lane_intelligence()
     elif embed_mode in {"executive_brief", "executive_briefs", "executive_shipping_readiness", "executive_briefing_center"}:
         render_executive_briefs_view(context, health, ops_data)
     elif embed_mode in {"executive_summary", "executive_brief_summary"}:
@@ -11416,82 +11520,7 @@ def main() -> None:
                     )
 
     if view == "Carrier OTP Bridge":
-        render_otp_weekly_summary()
-        if otp_bridge.empty:
-            st.info("Connect one or more OTP Bridge Google Sheets (tag: OTP), or upload a weekly OTP bridge workbook from the sidebar, to populate carrier performance.")
-        else:
-            otp_summary = summarize_otp(otp_bridge)
-            late_count = int(otp_bridge["On-Time Status"].str.lower().eq("late").sum())
-            total_shipments = len(otp_bridge)
-            overall_otp = 1 - (late_count / total_shipments if total_shipments else 0)
-            missing_check_calls = int((otp_bridge["Bridge Bucket"] == "Missing Check Call").sum())
-            late_pallets = otp_bridge.loc[
-                otp_bridge["On-Time Status"].str.lower().eq("late"), "Pallets"
-            ].sum()
-
-            col_otp, col_late, col_pallets, col_check = st.columns(4)
-            col_otp.metric("Overall OTP", format_percent(overall_otp))
-            col_late.metric("Late Shipments", format_number(late_count))
-            col_pallets.metric("Late Pallets", format_number(late_pallets))
-            col_check.metric("Missing Check Calls", format_number(missing_check_calls))
-
-            st.subheader("Carrier Reliability")
-            reliability_display = otp_summary.copy()
-            if "OTP %" in reliability_display.columns:
-                reliability_display["OTP %"] = reliability_display["OTP %"].apply(format_percent)
-            st.dataframe(
-                reliability_display,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            chart_col, bucket_col = st.columns([1.35, 1])
-            with chart_col:
-                st.subheader("OTP by SCAC")
-                fig = px.bar(
-                    otp_summary.sort_values("OTP %"),
-                    x="OTP %",
-                    y="SCAC",
-                    orientation="h",
-                    color="OTP %",
-                    color_continuous_scale="RdYlGn",
-                    range_color=[0.75, 1],
-                )
-                fig.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10))
-                st.plotly_chart(fig, use_container_width=True)
-
-            with bucket_col:
-                st.subheader("Bridge Reason Buckets")
-                bucket_summary = (
-                    otp_bridge["Bridge Bucket"]
-                    .value_counts()
-                    .rename_axis("Bridge Bucket")
-                    .reset_index(name="Count")
-                )
-                fig = px.pie(bucket_summary, values="Count", names="Bridge Bucket", hole=0.45)
-                fig.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10))
-                st.plotly_chart(fig, use_container_width=True)
-
-            st.subheader("Late Shipment Detail")
-            late_detail = otp_bridge[otp_bridge["On-Time Status"].str.lower().eq("late")].copy()
-            detail_cols = [
-                "Week",
-                "SCAC",
-                "TO #",
-                "Origin",
-                "Destination",
-                "Deliver By",
-                "Actual Delivery Arrival",
-                "Pallets",
-                "Delay Minutes",
-                "Bridge Bucket",
-                "Detailed Bridge",
-            ]
-            st.dataframe(
-                late_detail[[col for col in detail_cols if col in late_detail.columns]],
-                use_container_width=True,
-                hide_index=True,
-            )
+        render_carrier_otp_bridge_view(otp_bridge)
 
     if view == "Operations Productivity":
         ops_daily = ops_data.get("daily", pd.DataFrame())
