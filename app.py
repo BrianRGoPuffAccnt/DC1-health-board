@@ -2422,9 +2422,13 @@ def select_ob_tracker_sheets(sheet_names: list[str], n: int = 3) -> list[tuple[p
         if parsed is not None:
             month, day_num = parsed
             tab_date = pd.Timestamp(year=today.year, month=month, day=day_num)
-            # Skip future-dated tabs (e.g. a pre-created tomorrow tab, or a Dec tab seen in Jan
-            # with an incorrect year assigned).  Only load tabs on or before today.
-            if tab_date > today:
+            # DC1 works picking against a Planned Ship Date before that date arrives, so a
+            # near-future tab (e.g. 8/17's tab while today is still 8/16) can be full of
+            # live Picking/Staged rows and must not be excluded. Only skip a tab dated
+            # implausibly far ahead — that's the year-boundary misparse case (a December
+            # tab read in January gets assigned the wrong, current year and appears ~11
+            # months in the future), not legitimate near-term active work.
+            if tab_date > today + pd.Timedelta(days=14):
                 continue
         else:
             # Non-dated tab — assign an approximate date by position (oldest = furthest left)
