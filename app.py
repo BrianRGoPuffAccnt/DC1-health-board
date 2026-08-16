@@ -4509,6 +4509,121 @@ def render_outstanding_site_blocks(context: DailyHealthContext) -> None:
             )
 
 
+def parse_picker_names(cell: object) -> list[str]:
+    """Extract picker name(s) from an OB Tracker picker cell, discarding the trailing
+    placard-progress number(s). A cell with a '/' divider means two pickers split the
+    same GUSTO (e.g. 'DOM 1-3 / JAY 4' -> ['DOM', 'JAY']). Best-effort text parsing over
+    a free-typed column — not guaranteed to catch every naming variant."""
+    text = cell_text(cell)
+    if not text:
+        return []
+    names = []
+    for segment in text.split("/"):
+        segment = segment.strip()
+        if not segment:
+            continue
+        match = re.match(r"^([A-Za-z][A-Za-z\s\.'()\-]*?)(?=\s*\d|$)", segment)
+        name = (match.group(1).strip() if match and match.group(1).strip() else segment).upper()
+        if name:
+            names.append(name)
+    return names
+
+
+def current_pick_shift(now: datetime | None = None) -> str:
+    """Day shift 6 AM-6 PM Eastern, otherwise night shift. Adjust here if DC1's actual
+    shift boundary differs."""
+    hour = (now or now_eastern()).hour
+    return "day" if 6 <= hour < 18 else "night"
+
+
+def count_active_pickers(ob_tracker: pd.DataFrame, shift: str) -> tuple[int, list[str]]:
+    if ob_tracker.empty:
+        return 0, []
+    status_col = first_matching_column(ob_tracker, [["status"]])
+    picker_col = first_matching_column(
+        ob_tracker, [["picker", "day"]] if shift == "day" else [["picker", "night"]]
+    )
+    if not picker_col:
+        return 0, []
+    work = ob_tracker.copy()
+    if status_col:
+        status_values = work[status_col].astype(str).str.strip().str.casefold()
+        work = work[~status_values.eq("staged")]
+    names: set[str] = set()
+    for cell in work[picker_col]:
+        names.update(parse_picker_names(cell))
+    return len(names), sorted(names)
+
+
+def ob_tracker_units_left(ob_tracker: pd.DataFrame) -> int:
+    """Sum of Units for every GUSTO not yet Staged — the OB Tracker's own picking-complete
+    signal, independent of the Fill Rate-derived Units Left figure used elsewhere."""
+    if ob_tracker.empty:
+        return 0
+    status_col = first_matching_column(ob_tracker, [["status"]])
+    units_col = first_matching_column(ob_tracker, [["units"]])
+    if not units_col:
+        return 0
+    work = ob_tracker.copy()
+    if status_col:
+        status_values = work[status_col].astype(str).str.strip().str.casefold()
+        work = work[~status_values.eq("staged")]
+    return int(pd.to_numeric(work[units_col], errors="coerce").fillna(0).sum())
+
+
+def render_outbound_pulse(context: DailyHealthContext) -> None:
+    """Outbound's two sync-meeting headline numbers (units left to pick, pickers on
+    shift) plus an estimated-completion chart across pick-rate scenarios, since real
+    pick-rate isn't available to integrate live."""
+    ob_tracker = context.ob_tracker
+    if ob_tracker.empty:
+        st.info("Outbound pulse is waiting on the OB TO Tracker connection.")
+        return
+
+    shift = current_pick_shift()
+    units_left = ob_tracker_units_left(ob_tracker)
+    picker_count, picker_names = count_active_pickers(ob_tracker, shift)
+
+    st.markdown('<div class="gp-section-label">Outbound</div>', unsafe_allow_html=True)
+    outbound_cols = st.columns(2)
+    outbound_cols[0].metric("Units Left to Pick", format_number(units_left), "OB Tracker, not yet Staged")
+    outbound_cols[1].metric(f"Pickers on Shift ({shift.title()})", format_number(picker_count), "Distinct names, active GUSTOs")
+
+    if units_left and picker_count:
+        st.caption("Estimated time to clear the pick queue, by assumed rate scenario (no real pick-rate feed available):")
+        rate_cols = st.columns(3)
+        default_rates = {"Conservative": 30, "Average": 50, "Aggressive": 70}
+        scenarios = []
+        for col, (scenario_label, default_rate) in zip(rate_cols, default_rates.items()):
+            rate = col.number_input(
+                f"{scenario_label} units/hr per picker",
+                min_value=1,
+                value=default_rate,
+                step=5,
+                key=f"pick_rate_{scenario_label.lower()}",
+            )
+            hours = units_left / (picker_count * rate)
+            scenarios.append({"Scenario": scenario_label, "Units/hr/picker": rate, "Est. Hours Remaining": round(hours, 1)})
+
+        eta_df = pd.DataFrame(scenarios)
+        fig_eta = px.bar(
+            eta_df,
+            x="Scenario",
+            y="Est. Hours Remaining",
+            text="Est. Hours Remaining",
+            color="Scenario",
+            color_discrete_map={"Conservative": "#b93a3a", "Average": "#9a6a00", "Aggressive": "#1f7a4d"},
+        )
+        fig_eta.update_traces(texttemplate="%{text:.1f}h", textposition="outside")
+        fig_eta.update_layout(height=280, margin=dict(l=10, r=10, t=20, b=10), showlegend=False)
+        st.plotly_chart(fig_eta, use_container_width=True)
+    elif units_left and not picker_count:
+        st.caption(f"{format_number(units_left)} units left, but no pickers detected on the {shift} shift column — can't estimate completion time.")
+
+    with st.expander("Picker names detected this shift", expanded=False):
+        st.write(", ".join(picker_names) if picker_names else "None detected.")
+
+
 def render_live_update(context: DailyHealthContext) -> None:
     live_plan, live_label = scoped_shipment_plan(context.shipment_plan, "ship_today")
     status = "Waiting"
@@ -4527,6 +4642,7 @@ def render_live_update(context: DailyHealthContext) -> None:
         status,
         f"{live_label} | {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
+    render_outbound_pulse(context)
     if context.progress.empty and context.shipment_plan.empty:
         st.info("Refresh or connect PHL Ships, SDT Schedule, OB TO Tracker, and Fill Rate sheets to populate the live update.")
         if context.matched_columns:
