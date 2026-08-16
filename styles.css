@@ -1254,6 +1254,7 @@ h1 {
   font-size: 0.74rem;
   font-weight: 850;
   letter-spacing: 0.035em;
+  text-shadow: none !important;
   text-transform: uppercase;
 }
 
@@ -1263,6 +1264,7 @@ h1 {
   font-weight: 900;
   line-height: 1.25;
   margin-top: 0.2rem;
+  text-shadow: none !important;
 }
 
 .gp-operating-card__meta {
@@ -1280,6 +1282,7 @@ h1 {
   font-weight: 900;
   margin-top: auto;
   padding: 0.32rem 0.55rem;
+  text-shadow: none !important;
   width: fit-content;
 }
 

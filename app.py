@@ -9311,6 +9311,55 @@ def fill_context_by_profile_keys(base: pd.DataFrame, context: pd.DataFrame) -> p
     return result
 
 
+def build_active_gusto_context() -> tuple[pd.DataFrame, str]:
+    """Active GUSTO per MFC, computed live: a GUSTO becomes active once the OB Tracker's
+    Status for it reaches Loaded, and stops being active once either OTP Bridge workbook
+    shows it Delivered. This replaces the old Allocation History-sourced Active GUSTO,
+    which only reflected what was planned, not what's actually in flight right now."""
+    ob_connection = latest_google_sheet_by_type("OB TO Tracker")
+    ob_tracker, _, _, _ = load_multi_tab_ob_tracker(ob_connection, n=3)
+    if ob_tracker.empty:
+        return pd.DataFrame(), ""
+
+    status_col = first_matching_column(ob_tracker, [["status"]])
+    to_col = first_matching_column(ob_tracker, [["to"], ["po", "number"]])
+    location_col = first_matching_column(ob_tracker, [["locations"], ["location"]])
+    ship_date_col = first_matching_column(ob_tracker, [["planned", "ship", "date"]])
+    if not status_col or not to_col or not location_col:
+        return pd.DataFrame(), ""
+
+    loaded = ob_tracker[ob_tracker[status_col].astype(str).str.strip().str.casefold().eq("loaded")].copy()
+    if loaded.empty:
+        return pd.DataFrame(), "OB TO Tracker + OTP Bridge"
+
+    otp_connections = all_google_sheets_by_type("OTP")
+    delivered_tos: set[str] = set()
+    if not otp_connections.empty:
+        otp_bridge = load_otp_bridges_from_google_sheets(otp_connections)
+        if not otp_bridge.empty and "Status" in otp_bridge.columns and "TO #" in otp_bridge.columns:
+            delivered_mask = otp_bridge["Status"].astype(str).str.strip().str.casefold().str.contains("delivered", na=False)
+            delivered_tos = set(otp_bridge.loc[delivered_mask, "TO #"].astype(str).str.strip())
+
+    loaded["_to_key"] = loaded[to_col].astype(str).str.strip()
+    active = loaded[~loaded["_to_key"].isin(delivered_tos)].copy()
+    if active.empty:
+        return pd.DataFrame(), "OB TO Tracker + OTP Bridge"
+
+    if ship_date_col:
+        active["_ship_date_sort"] = pd.to_datetime(active[ship_date_col], errors="coerce")
+        active = active.sort_values("_ship_date_sort")
+
+    result = pd.DataFrame(
+        {
+            "Active GUSTO": active[to_col].astype(str).str.strip(),
+            "Active Status": "Loaded",
+            "_site_id_key": active[location_col].map(compact_site_id),
+            "_location_key": active[location_col].map(compact_location_key),
+        }
+    )
+    return result.drop_duplicates(["_site_id_key", "_location_key"], keep="last"), "OB TO Tracker + OTP Bridge"
+
+
 def enrich_market_profile_operating_context(profile: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
     enriched = profile.copy()
     enriched["_site_id_key"] = enriched.get("Location ID", pd.Series("", index=enriched.index)).map(compact_site_id)
@@ -9336,6 +9385,17 @@ def enrich_market_profile_operating_context(profile: pd.DataFrame) -> tuple[pd.D
     if not hypercare.empty:
         context_sources["S&OP Hypercare"] = hypercare_sheet
         enriched = fill_context_by_profile_keys(enriched, hypercare)
+
+    # Active GUSTO must reflect live OB Tracker + OTP Bridge truth, not the Allocation
+    # History plan (which only says what WAS planned) — reset then fill, so a GUSTO that's
+    # been delivered actually disappears instead of showing stale planned data.
+    enriched["Active GUSTO"] = ""
+    enriched["Active Status"] = ""
+    active_context, active_sheet = build_active_gusto_context()
+    if active_sheet:
+        context_sources["Active GUSTO (OB Tracker + OTP Bridge)"] = active_sheet
+    if not active_context.empty:
+        enriched = fill_context_by_profile_keys(enriched, active_context)
 
     return enriched.drop(columns=["_site_id_key", "_location_key"], errors="ignore"), context_sources
 
@@ -9476,15 +9536,22 @@ def render_mfc_network_map(profile: pd.DataFrame, focus: pd.DataFrame | None = N
         legend=dict(orientation="h", y=-0.04),
         geo=dict(
             bgcolor="rgba(0,0,0,0)",
-            landcolor="#edf2f7",
-            lakecolor="#dbeafe",
-            subunitcolor="#cbd5e1",
+            landcolor="#dbe2ea",
+            lakecolor="#c7d9ef",
+            subunitcolor="#151922",
+            subunitwidth=1.1,
+            countrycolor="#151922",
+            countrywidth=1.1,
+            showcountries=True,
+            coastlinecolor="#151922",
+            coastlinewidth=1.1,
+            showcoastlines=True,
             center=dict(lat=float(center_source["latitude"].mean()), lon=float(center_source["longitude"].mean())),
             projection=dict(scale=projection_scale),
         ),
     )
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Map nodes use MFC market prefixes with available site/profile enrichment; active GUSTO context comes from the Allocation History connection when present.")
+    st.caption("Map nodes use MFC market prefixes with available site/profile enrichment. Active GUSTO reflects the live OB Tracker (Loaded) minus OTP Bridge (Delivered) status.")
 
 
 def render_market_profile_detail(
