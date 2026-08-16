@@ -4630,7 +4630,7 @@ def count_active_pickers(ob_tracker: pd.DataFrame, shift: str) -> tuple[int, lis
     work = ob_tracker.copy()
     if status_col:
         status_values = work[status_col].astype(str).str.strip().str.casefold()
-        work = work[~status_values.eq("staged")]
+        work = work[~status_values.isin(["staged", "loaded"])]
     names: set[str] = set()
     for cell in work[picker_col]:
         names.update(parse_picker_names(cell))
@@ -4638,8 +4638,11 @@ def count_active_pickers(ob_tracker: pd.DataFrame, shift: str) -> tuple[int, lis
 
 
 def ob_tracker_units_left(ob_tracker: pd.DataFrame) -> int:
-    """Sum of Units for every GUSTO not yet Staged — the OB Tracker's own picking-complete
-    signal, independent of the Fill Rate-derived Units Left figure used elsewhere."""
+    """Sum of Units for every GUSTO still outstanding (Allocated or Picking) — the OB
+    Tracker's own picking-complete signal, independent of the Fill Rate-derived Units
+    Left figure used elsewhere. Staged AND Loaded both mean picking is already done
+    (Staged = ready to load, Loaded = already shipped) — excluding only Staged would
+    still count fully-shipped GUSTOs as "left to pick"."""
     if ob_tracker.empty:
         return 0
     status_col = first_matching_column(ob_tracker, [["status"]])
@@ -4649,7 +4652,7 @@ def ob_tracker_units_left(ob_tracker: pd.DataFrame) -> int:
     work = ob_tracker.copy()
     if status_col:
         status_values = work[status_col].astype(str).str.strip().str.casefold()
-        work = work[~status_values.eq("staged")]
+        work = work[~status_values.isin(["staged", "loaded"])]
     return int(pd.to_numeric(work[units_col], errors="coerce").fillna(0).sum())
 
 
@@ -4721,14 +4724,49 @@ def render_picker_assignment_table(ob_tracker: pd.DataFrame) -> None:
     )
 
 
+def active_ship_date_keys(ob_tracker: pd.DataFrame) -> set:
+    """Planned Ship Date treated as an opaque grouping key, not a calendar date —
+    "tomorrow" isn't a real operational concept here, only "the next key in the queue,"
+    which has nothing to report until work actually starts on it. Returns the key(s)
+    currently classified ACTIVE, the canonical scope for every Outbound pulse number."""
+    summary = build_ob_ship_date_summary(ob_tracker)
+    if summary.empty:
+        return set()
+    return set(summary[summary["Classification"].eq("ACTIVE")]["Planned Ship Date"])
+
+
+def scope_ob_tracker_to_active(ob_tracker: pd.DataFrame) -> pd.DataFrame:
+    """Filter the OB Tracker down to rows belonging to a currently-ACTIVE Planned Ship
+    Date key, so a not-yet-started key's fully-Allocated units can never bleed into
+    "units left to pick" just because it happens to share the same 3-tab tracker."""
+    date_col = first_matching_column(ob_tracker, [["planned", "ship", "date"]])
+    if ob_tracker.empty or not date_col:
+        return ob_tracker
+    keys = active_ship_date_keys(ob_tracker)
+    if not keys:
+        return ob_tracker.iloc[0:0]
+    work = ob_tracker.copy()
+    work["_planned_ship_date"] = pd.to_datetime(work[date_col], errors="coerce").dt.normalize()
+    return work[work["_planned_ship_date"].isin(keys)].drop(columns=["_planned_ship_date"])
+
+
 def render_outbound_pulse(context: DailyHealthContext) -> None:
     """Outbound's sync-meeting headline number (units left to pick) plus a labor-
     allocation planner: picker supply per shift compared against pick-rate scenarios,
     independent of hours actually remaining in that shift — a "how many pickers do we
-    need" tool, not a live ETA. Flags anything over 8 hours as needing more pickers."""
-    ob_tracker = context.ob_tracker
-    if ob_tracker.empty:
+    need" tool, not a live ETA. Flags anything over 8 hours as needing more pickers.
+    Everything here is scoped to the currently-ACTIVE Planned Ship Date key(s) only —
+    see scope_ob_tracker_to_active()."""
+    if context.ob_tracker.empty:
         st.info("Outbound pulse is waiting on the OB TO Tracker connection.")
+        return
+
+    ob_tracker = scope_ob_tracker_to_active(context.ob_tracker)
+    if ob_tracker.empty:
+        st.info(
+            "No Planned Ship Date key is currently ACTIVE in the tracked OB Tracker tabs — "
+            "either between batches, or everything tracked is still fully Allocated/already Loaded."
+        )
         return
 
     units_left = ob_tracker_units_left(ob_tracker)
@@ -4737,7 +4775,7 @@ def render_outbound_pulse(context: DailyHealthContext) -> None:
     active_shift = current_pick_shift()
 
     st.markdown('<div class="gp-section-label">Outbound</div>', unsafe_allow_html=True)
-    st.metric("Units Left to Pick", format_number(units_left), "OB Tracker, not yet Staged")
+    st.metric("Units Left to Pick", format_number(units_left), "Active Planned Ship Date key(s), not yet Staged")
 
     if not units_left:
         render_picker_assignment_table(ob_tracker)
