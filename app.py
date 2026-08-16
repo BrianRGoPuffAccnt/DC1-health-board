@@ -4180,6 +4180,16 @@ def build_decision_support_mfc_profile() -> pd.DataFrame:
     return profile
 
 
+def dc1_operating_reference_text() -> str:
+    """ABOUT.md in full — glossary, page descriptions, and the OB Tracker notation
+    reference (status progression, picker/placard shorthand, shift schedule) — read at
+    runtime so the chat's reference material can never drift from the human-facing docs."""
+    try:
+        return Path("ABOUT.md").read_text()
+    except OSError:
+        return ""
+
+
 def build_decision_support_context(context: DailyHealthContext, health: HealthResult, ops_data: dict[str, pd.DataFrame]) -> str:
     """Bounded-size text payload grounding the Decision Support Chat in live DC1 data.
     Reuses existing summary/enrichment functions rather than re-reading raw sheets."""
@@ -4196,6 +4206,37 @@ def build_decision_support_context(context: DailyHealthContext, health: HealthRe
         sections.append("=== Carrier Route Progress (per SDT/OB Tracker) ===")
         sections.append(dataframe_to_markdown_table(context.progress, progress_cols, 500))
 
+    if not context.shipment_plan.empty:
+        lane_readiness = plan_lane_readiness(context.shipment_plan)
+        if not lane_readiness.empty:
+            readiness_cols = [
+                "Carrier", "Planned_TOs", "Allocated", "Picking", "Staged", "Loaded",
+                "Missing_in_OB", "Planned_Pallets", "Units_NYP", "Picked_Units",
+            ]
+            sections.append("=== PHL Ships Execution Stage by Carrier (Units_NYP = units left) ===")
+            sections.append(dataframe_to_markdown_table(lane_readiness, readiness_cols, 200))
+
+    ship_date_summary = build_ob_ship_date_summary(context.ob_tracker)
+    if not ship_date_summary.empty:
+        display_dates = ship_date_summary.copy()
+        display_dates["Planned Ship Date"] = display_dates["Planned Ship Date"].dt.strftime("%m/%d/%Y")
+        sections.append(
+            "=== OB Tracker Planned Ship Date Status (CLOSED = fully Loaded, ACTIVE = has "
+            "Picking or any not-fully-Loaded mix, UPCOMING = all Allocated) ==="
+        )
+        sections.append(dataframe_to_markdown_table(display_dates, list(display_dates.columns), 100))
+
+    if not context.ob_tracker.empty:
+        units_left = ob_tracker_units_left(context.ob_tracker)
+        day_count, _ = count_active_pickers(context.ob_tracker, "day")
+        ns_count, _ = count_active_pickers(context.ob_tracker, "night")
+        sections.append("=== Outbound Labor Snapshot ===")
+        sections.append(
+            f"Units left to pick (OB Tracker, not yet Staged): {units_left:,}. "
+            f"Distinct pickers currently on Day shift (7:00 AM-3:00 PM): {day_count}. "
+            f"Distinct pickers currently on NS/second shift (3:00 PM-11:30 PM): {ns_count}."
+        )
+
     try:
         mfc_profile = build_decision_support_mfc_profile()
     except Exception:
@@ -4208,6 +4249,11 @@ def build_decision_support_context(context: DailyHealthContext, health: HealthRe
         ]
         sections.append("=== MFC Profiles (Training Cheat Sheet + operating context) — lookup by Site label or Location ID ===")
         sections.append(dataframe_to_markdown_table(mfc_profile, profile_cols, 1000))
+
+    reference = dc1_operating_reference_text()
+    if reference:
+        sections.append("=== DC1 Operating Reference (glossary, page guide, OB Tracker notation) ===")
+        sections.append(reference)
 
     return "\n\n".join(sections)
 

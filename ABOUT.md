@@ -96,6 +96,37 @@ A Claude-powered assistant (Home section) that answers questions against live DC
 
 ---
 
+## Reading the OB Tracker
+
+The OB TO Tracker is DC1's most detailed live source — Live Update, Executive Briefs, and Decision Support Chat are all built on top of it. A few of its conventions aren't self-explanatory:
+
+**Status progression** — every GUSTO row moves through four states in order:
+
+`Allocated` → `Picking` → `Staged` → `Loaded`
+
+- **Allocated** — assigned to the tracker, picking hasn't started
+- **Picking** — actively being picked right now
+- **Staged** — picking finished, palletized and ready to load, but not yet on a truck
+- **Loaded** — physically loaded and gone. This is the only state that counts as fully done — Staged is close, but not confirmed complete.
+
+**Planned Ship Date classification** (Executive Briefs' Previous/Current Operational Day tables) groups every GUSTO by its Planned Ship Date and classifies the whole date:
+
+- **CLOSED** — every GUSTO for that date is Loaded
+- **ACTIVE** — at least one GUSTO is Picking, or the date is a mix that's neither 100% Loaded nor 100% Allocated (e.g. some Staged, some still Allocated) — anything short of fully Loaded still counts as outstanding
+- **UPCOMING** — every GUSTO for that date is still Allocated
+
+More than one date showing ACTIVE at once is a real signal, not a bug — it usually means an earlier date never fully closed out while a newer one is already being worked.
+
+**Picker columns** (`PICKER(S) DAYS`, `PICKER(S) NIGHTS`) use shorthand: a picker's name is followed by the placard number(s) they've completed toward that GUSTO, where **one placard = one pallet**. A `/` divider means two pickers split the same GUSTO. Examples:
+
+- `DOM 1-3` — DOM completed placards 1 through 3
+- `DOM 1-3 / JAY 4` — DOM did placards 1–3, JAY did placard 4, same GUSTO
+- `KAREEM 1, 3 / NIA 2-5` — a non-contiguous split between two pickers
+
+**Shift schedule**: Day 7:00 AM–3:00 PM, NS (second shift) 3:00 PM–11:30 PM Eastern. NS is expected to be phased out eventually under a day-shift-only model — not yet scheduled, so the app tracks both shifts as parallel scenarios rather than assuming one is "current."
+
+---
+
 ## How Data Flows
 
 ```
