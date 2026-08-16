@@ -4816,16 +4816,19 @@ def render_live_update(context: DailyHealthContext) -> None:
     render_brief_panel("Copy-ready live briefing feed", make_live_update_note(context))
 
 
-def classify_ob_tracker_ship_dates(ob_tracker: pd.DataFrame) -> pd.DataFrame:
-    """Groups OB Tracker rows (the 3 most recent dated tabs — the ones tracked furthest
-    right in the sheet) by Planned Ship Date and classifies each date's overall picking
-    state: ACTIVE if any row is Picking (also covers a Staged/Allocated mix with no
-    Picking present — still in progress, just not being actively worked this moment),
-    CLOSED if every row is Staged, UPCOMING if every row is Allocated."""
+def build_ob_ship_date_summary(ob_tracker: pd.DataFrame) -> pd.DataFrame:
+    """Per Planned Ship Date status breakdown from the OB Tracker's 3 most recently
+    tracked tabs. Real status progression is Allocated -> Picking -> Staged -> Loaded.
+    CLOSED requires every row Loaded — Staged alone is not closed, since the pallet
+    hasn't actually left yet. ACTIVE is any row Picking, or any other mix that isn't
+    100% Loaded and isn't 100% Allocated (e.g. Staged-but-not-Loaded is still
+    outstanding work, not confirmed done). UPCOMING is every row Allocated."""
     if ob_tracker.empty:
         return pd.DataFrame()
     status_col = first_matching_column(ob_tracker, [["status"]])
     date_col = first_matching_column(ob_tracker, [["planned", "ship", "date"]])
+    units_col = first_matching_column(ob_tracker, [["units"]])
+    to_col = first_matching_column(ob_tracker, [["to"], ["po", "number"]])
     if not status_col or not date_col:
         return pd.DataFrame()
 
@@ -4839,82 +4842,71 @@ def classify_ob_tracker_ship_dates(ob_tracker: pd.DataFrame) -> pd.DataFrame:
     def classify(statuses: pd.Series) -> str:
         if statuses.eq("picking").any():
             return "ACTIVE"
-        if statuses.eq("staged").all():
+        if statuses.eq("loaded").all():
             return "CLOSED"
         if statuses.eq("allocated").all():
             return "UPCOMING"
         return "ACTIVE"
 
-    grouped = (
-        work.groupby("_planned_ship_date")["_status_norm"]
-        .apply(classify)
-        .reset_index()
-        .rename(columns={"_planned_ship_date": "Planned Ship Date", "_status_norm": "Classification"})
-        .sort_values("Planned Ship Date")
-    )
-    return grouped
+    rows = []
+    for target_date, group in work.groupby("_planned_ship_date"):
+        statuses = group["_status_norm"]
+        units_total = int(pd.to_numeric(group[units_col], errors="coerce").fillna(0).sum()) if units_col else 0
+        total_tos = int(group[to_col].nunique()) if to_col else len(group)
+        rows.append(
+            {
+                "Planned Ship Date": target_date,
+                "Classification": classify(statuses),
+                "Total TOs": total_tos,
+                "Allocated": int(statuses.eq("allocated").sum()),
+                "Picking": int(statuses.eq("picking").sum()),
+                "Staged": int(statuses.eq("staged").sum()),
+                "Loaded": int(statuses.eq("loaded").sum()),
+                "Units": units_total,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("Planned Ship Date")
 
 
-def render_ob_ship_date_panel(context: DailyHealthContext, label: str, target_date: pd.Timestamp | None, classification: str) -> None:
-    """KPI panel for one Planned Ship Date's OB Tracker status breakdown."""
+def render_ob_ship_date_table(label: str, calendar_day: pd.Timestamp, summary: pd.DataFrame, empty_message: str) -> None:
+    """Table of every Planned Ship Date currently in one classification bucket. The
+    calendar day in the header is a fixed anchor label — the table can (and should)
+    show a different date if the real OB Tracker data hasn't caught up to it, so a late
+    shipment stays visible instead of being silently swapped out."""
     st.markdown(
-        f'<div class="gp-section-label">{html.escape(label)}'
-        + (f" — {target_date.strftime('%A %m/%d/%Y')}" if target_date is not None else "")
-        + "</div>",
+        f'<div class="gp-section-label">{html.escape(label)} — {calendar_day.strftime("%A %m/%d/%Y")}</div>',
         unsafe_allow_html=True,
     )
-    if target_date is None:
-        st.caption(f"No Planned Ship Date is currently classified {classification} in the tracked OB Tracker tabs.")
+    if summary.empty:
+        st.caption(empty_message)
         return
-
-    ob_tracker = context.ob_tracker
-    status_col = first_matching_column(ob_tracker, [["status"]])
-    date_col = first_matching_column(ob_tracker, [["planned", "ship", "date"]])
-    units_col = first_matching_column(ob_tracker, [["units"]])
-    to_col = first_matching_column(ob_tracker, [["to"], ["po", "number"]])
-
-    work = ob_tracker.copy()
-    work["_planned_ship_date"] = pd.to_datetime(work[date_col], errors="coerce").dt.normalize()
-    rows = work[work["_planned_ship_date"].eq(target_date)]
-    if rows.empty:
-        st.caption("No OB Tracker rows found for this date.")
-        return
-
-    status_values = rows[status_col].astype(str).str.strip().str.casefold()
-    allocated_count = int(status_values.eq("allocated").sum())
-    picking_count = int(status_values.eq("picking").sum())
-    staged_count = int(status_values.eq("staged").sum())
-    total_units = int(pd.to_numeric(rows[units_col], errors="coerce").fillna(0).sum()) if units_col else 0
-    total_tos = int(rows[to_col].nunique()) if to_col else len(rows)
-
-    render_enterprise_kpi_grid(
-        [
-            {"label": "Total TOs", "value": format_number(total_tos), "delta": classification.title(), "accent": "neutral"},
-            {"label": "Allocated", "value": format_number(allocated_count), "delta": "not yet picking", "accent": "yellow" if allocated_count else "neutral"},
-            {"label": "Picking", "value": format_number(picking_count), "delta": "in progress", "accent": "yellow" if picking_count else "neutral"},
-            {"label": "Staged", "value": format_number(staged_count), "delta": "ready to load", "accent": "green" if staged_count else "neutral"},
-            {"label": "Units", "value": format_number(total_units), "delta": "total for this date", "accent": "neutral"},
-        ],
-        columns=5,
+    st.dataframe(
+        summary,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Planned Ship Date": st.column_config.DateColumn("Planned Ship Date", format="ddd MM/DD/YYYY"),
+            "Units": st.column_config.NumberColumn("Units", format="%,.0f"),
+        },
     )
 
 
 def render_executive_briefs_view(context: DailyHealthContext, health: HealthResult, ops_data: dict[str, pd.DataFrame]) -> None:
     brief = make_executive_daily_brief(context, health, ops_data)
-    ship_dates = classify_ob_tracker_ship_dates(context.ob_tracker)
-    closed_dates = ship_dates[ship_dates["Classification"].eq("CLOSED")] if not ship_dates.empty else ship_dates
-    active_dates = ship_dates[ship_dates["Classification"].eq("ACTIVE")] if not ship_dates.empty else ship_dates
-    previous_date = closed_dates["Planned Ship Date"].max() if not closed_dates.empty else None
-    current_date = active_dates["Planned Ship Date"].max() if not active_dates.empty else None
-    pick_target = current_date if current_date is not None else next_operational_day()
+    ship_date_summary = build_ob_ship_date_summary(context.ob_tracker)
+    closed_summary = ship_date_summary[ship_date_summary["Classification"].eq("CLOSED")].drop(columns=["Classification"]) if not ship_date_summary.empty else ship_date_summary
+    active_summary = ship_date_summary[ship_date_summary["Classification"].eq("ACTIVE")].drop(columns=["Classification"]) if not ship_date_summary.empty else ship_date_summary
+    pick_target = next_operational_day()
     status = health.label
     if not context.progress.empty:
         status = str(summarize_daily_health_progress(context.progress)["status"])
     render_enterprise_module_header(
         "Executive Briefing Center",
         "DC1 Shipping Readiness Brief",
-        "Split by OB Tracker Planned Ship Date status — CLOSED (previous, fully staged) "
-        "and ACTIVE (current, being picked now) — from the 3 most recently tracked tabs.",
+        "Every Planned Ship Date from the 3 most recently tracked OB Tracker tabs, grouped "
+        "by status — CLOSED (fully Loaded) under Previous, ACTIVE (Picking, or anything "
+        "short of fully Loaded) under Current. More than one active date can mean an "
+        "earlier date is running late and needs attention.",
         status,
         f"Prepared {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
     )
@@ -4924,9 +4916,19 @@ def render_executive_briefs_view(context: DailyHealthContext, health: HealthResu
     else:
         day_cols = st.columns(2)
         with day_cols[0]:
-            render_ob_ship_date_panel(context, "Previous Operational Day (CLOSED)", previous_date, "CLOSED")
+            render_ob_ship_date_table(
+                "Previous Operational Day",
+                previous_working_day(),
+                closed_summary,
+                "No Planned Ship Date is fully Loaded (CLOSED) yet in the tracked tabs.",
+            )
         with day_cols[1]:
-            render_ob_ship_date_panel(context, "Current Operational Day (ACTIVE)", current_date, "ACTIVE")
+            render_ob_ship_date_table(
+                "Current Operational Day",
+                pick_target,
+                active_summary,
+                "No Planned Ship Date is currently ACTIVE in the tracked tabs.",
+            )
 
         render_outstanding_site_blocks(context)
 
