@@ -4639,9 +4639,9 @@ def render_picker_assignment_table(ob_tracker: pd.DataFrame) -> None:
         [
             {
                 "Shift": "",
-                "Picker": "TOTAL",
+                "Picker": f"TOTAL ({len(detail):,} pickers)",
                 "Status": "",
-                "GUSTO": f"{len(detail):,} assignment(s)",
+                "GUSTO": "",
                 "Placard Progress": "",
                 "Units": detail["Units"].sum(),
                 "Carrier": "",
