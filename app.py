@@ -9575,20 +9575,25 @@ def build_active_gusto_context() -> tuple[pd.DataFrame, str]:
 
     loaded = ob_tracker[ob_tracker[status_col].astype(str).str.strip().str.casefold().eq("loaded")].copy()
     if loaded.empty:
-        return pd.DataFrame(), "OB TO Tracker + OTP Bridge"
+        return pd.DataFrame(), "OB TO Tracker + OTP Bridge (0 Loaded rows in the 3 tracked tabs)"
 
     otp_connections = all_google_sheets_by_type("OTP")
     delivered_tos: set[str] = set()
+    otp_note = "OTP not connected"
     if not otp_connections.empty:
         otp_bridge = load_otp_bridges_from_google_sheets(otp_connections)
         if not otp_bridge.empty and "Status" in otp_bridge.columns and "TO #" in otp_bridge.columns:
             delivered_mask = otp_bridge["Status"].astype(str).str.strip().str.casefold().str.contains("delivered", na=False)
             delivered_tos = set(otp_bridge.loc[delivered_mask, "TO #"].astype(str).str.strip())
+            otp_note = f"{len(delivered_tos)} Delivered in OTP Bridge"
+        else:
+            otp_note = "OTP Bridge connected but no Status/TO # rows parsed"
 
     loaded["_to_key"] = loaded[to_col].astype(str).str.strip()
     active = loaded[~loaded["_to_key"].isin(delivered_tos)].copy()
+    funnel_note = f"OB TO Tracker + OTP Bridge ({len(loaded)} Loaded, {otp_note}, {len(active)} still undelivered)"
     if active.empty:
-        return pd.DataFrame(), "OB TO Tracker + OTP Bridge"
+        return pd.DataFrame(), funnel_note
 
     if ship_date_col:
         active["_ship_date_sort"] = pd.to_datetime(active[ship_date_col], errors="coerce")
@@ -9602,7 +9607,9 @@ def build_active_gusto_context() -> tuple[pd.DataFrame, str]:
             "_location_key": active[location_col].map(compact_location_key),
         }
     )
-    return result.drop_duplicates(["_site_id_key", "_location_key"], keep="last"), "OB TO Tracker + OTP Bridge"
+    result = result.drop_duplicates(["_site_id_key", "_location_key"], keep="last")
+    matched_sites = int((result["_site_id_key"].str.strip().ne("") | result["_location_key"].str.strip().ne("")).sum())
+    return result, f"{funnel_note}, {matched_sites} distinct site key(s) resolved"
 
 
 def enrich_market_profile_operating_context(profile: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
