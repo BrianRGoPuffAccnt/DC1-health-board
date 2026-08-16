@@ -4789,8 +4789,28 @@ def render_outbound_pulse(context: DailyHealthContext) -> None:
     render_picker_assignment_table(ob_tracker)
 
 
+def render_active_ship_date_tags(ob_tracker: pd.DataFrame) -> None:
+    """One pill per Planned Ship Date currently classified ACTIVE — the date(s) the
+    Outbound pulse's Units Left figure below is actually drawn from. Deliberately not
+    collapsed to a single "today" label: if more than one date is still active (an
+    older one hasn't fully Loaded out while a newer one is already being picked), every
+    one of them gets its own tag here, same as the Executive Briefs classification."""
+    summary = build_ob_ship_date_summary(ob_tracker)
+    if summary.empty:
+        return
+    active_dates = summary[summary["Classification"].eq("ACTIVE")]["Planned Ship Date"]
+    if active_dates.empty:
+        return
+    tags = "".join(
+        f'<span class="gp-status-pill gp-status-pill--green" style="margin-right:0.4rem;margin-bottom:0.3rem;">'
+        f'ACTIVE {d.strftime("%m/%d/%Y")}</span>'
+        for d in active_dates
+    )
+    st.markdown(f'<div style="margin:0.1rem 0 0.7rem;">{tags}</div>', unsafe_allow_html=True)
+
+
 def render_live_update(context: DailyHealthContext) -> None:
-    live_plan, live_label = scoped_shipment_plan(context.shipment_plan, "ship_today")
+    live_plan, _ = scoped_shipment_plan(context.shipment_plan, "ship_today")
     status = "Waiting"
     if not context.progress.empty:
         status = str(summarize_daily_health_progress(context.progress)["status"])
@@ -4805,8 +4825,9 @@ def render_live_update(context: DailyHealthContext) -> None:
         "DC1 Live Update",
         "Ship-date pulse for tonight's PHL Ships plan, OB execution stage, Fill Rate readiness, and route-level risk.",
         status,
-        f"{live_label} | {now_eastern().strftime('%m/%d/%Y %I:%M %p')}",
+        now_eastern().strftime("%m/%d/%Y %I:%M %p"),
     )
+    render_active_ship_date_tags(context.ob_tracker)
     render_outbound_pulse(context)
     if context.progress.empty and context.shipment_plan.empty:
         st.info("Refresh or connect PHL Ships, SDT Schedule, OB TO Tracker, and Fill Rate sheets to populate the live update.")
@@ -4820,7 +4841,6 @@ def render_live_update(context: DailyHealthContext) -> None:
         next_plan, next_label = scoped_shipment_plan(context.shipment_plan, "next_ship")
         st.info(f"No PHL Ships rows are scoped to today's ship date. Showing {next_label.lower()} instead.")
         live_plan = next_plan
-        live_label = next_label
 
     summary = summarize_daily_health_progress(context.progress) if not context.progress.empty else {
         "status": status,
